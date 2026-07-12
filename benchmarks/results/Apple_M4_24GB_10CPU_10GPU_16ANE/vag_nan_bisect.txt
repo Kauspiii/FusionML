@@ -1,0 +1,6 @@
+mlx 0.32.0
+  A manual_silu   fwd=-0.003777  vag=-0.003777  vag_finite=True  grads_finite=True
+  B nn_silu       fwd=-0.003651  vag=-0.003651  vag_finite=True  grads_finite=True
+  C nn_gelu(gpt2) fwd=+0.024445  vag=+0.024445  vag_finite=True  grads_finite=True
+  D nn_silu_small fwd=+0.011780  vag=+0.011780  vag_finite=True  grads_finite=True
+  E exact_import   vag=+nan  vag_finite=False

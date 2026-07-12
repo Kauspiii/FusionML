@@ -37,10 +37,15 @@ the committed (unscaled, softmax-free) code, which overflows FP16 training
 to NaN, exactly as the June postmortem predicted. Bisected conclusively
 (`vag_nan_bisect.py`/`vag_nan_bisect2.py`: identical math copied from the
 working tree = finite; imported committed function = NaN; same process,
-weights, versions). Fix committed in 5506d46. All M4 training numbers
-produced before that commit timed the wrong computation and are INVALID —
-re-run `mlx_fp16_training_baseline.py` on the mini. Prefill/split results
-are unaffected (self-contained fixed math). Side finding kept: MLX 0.30.1
+weights, versions). Fix committed in 5506d46; full framework synced in b3fd136 (the entire
+Python+Swift framework had been working-tree-only). Prefill/split results
+were never affected (self-contained fixed math).
+
+**Corrected M4 training numbers (valid, losses finite):** Llama — MLX-FP32
+572.3 ms, MLX-FP16 434.7 ms, FusionML 457.7 ms → **0.950× vs fair baseline**;
+GPT-2 — 81.4 / 65.4 / 72.1 ms → **0.907×**. Matches the M1 result
+(0.969×/0.858×): FusionML training loses to MLX-FP16 on BOTH hardware
+generations. The training honest-negative is now dual-hardware verified. Side finding kept: MLX 0.30.1
 vs 0.32.0 both compute this workload finitely on both chips, and the ANE
 crash conditions are absent on the mini's stack (macOS 26.3, same
 coremltools 9.0 — repros run clean there, segfault on macOS 25.5).

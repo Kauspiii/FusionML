@@ -2,7 +2,7 @@
 
 **High-Performance Machine Learning Framework for Apple Silicon**
 
-FusionML delivers PyTorch-like ease of use with a unique advantage: **intelligent parallel execution across GPU, CPU, and Neural Engine** – achieving up to 31% faster matrix operations through hardware fusion.
+FusionML delivers PyTorch-like ease of use with a unique advantage: **intelligent parallel execution across GPU, CPU, and Neural Engine** — measured **1.13–1.25×** faster transformer blocks than a precision-matched MLX baseline on M4, and up to **1.79×** on batch-scale matmuls, with a runtime gate that never regresses below baseline. All numbers fair-baseline and reproducible: see [Performance](#performance).
 
 ## Features
 
@@ -94,11 +94,33 @@ Fusion.gpu.matmul(a, b)      // Force GPU
 
 ## Performance
 
-| Operation | CPU | GPU | Fusion (smart) | Speedup / Latency Reduction |
-|-----------|-----|-----|----------------|-----------------------------|
-| MatMul 1024² | 1.86 ms | 4.52 ms | 1.42 ms | +23.7% (vs CPU) |
-| MatMul 2048² | 20.15 ms | 12.41 ms | 8.14 ms | +34.4% (vs GPU) |
-| MatMul 4096² | 163.33 ms | 93.36 ms | 52.12 ms | +44.2% (vs GPU via ANE) |
+Fair-baseline, precision-matched (FP16 vs FP16), correctness-checked. Full
+methodology, per-cell numbers, and honest negatives: [`benchmarks/PAPER_READINESS.md`](benchmarks/PAPER_READINESS.md).
+
+| Workload | vs fair MLX-FP16 baseline | Hardware |
+|-----------|--------------------------|----------|
+| Transformer decoder block, per-layer CPU+GPU split (seq 1024–8192) | **1.13–1.25×** | M4 24GB (replicated) |
+| Same, on 8GB fanless M1 | 1.06–1.18× | M1 8GB |
+| Batch-scale matmul, contention-aware 3-way split (4096–8192 rows) | up to **1.79×** vs GPU-only | M1 |
+| Dynamic runtime gate (split/nosplit/eager) | never below baseline (≥1.0× every cell) | M4 |
+
+Known honest negatives (disclosed, not hidden): single-block *training* is
+0.86–0.97× vs MLX-FP16 on both chips, and ANE dispatch overhead (~20 ms via
+CoreML) makes per-layer ANE routing non-viable on current stacks.
+
+### Contribute benchmark results (M2/M3/M4 wanted!)
+
+We're collecting clean-protocol results across Apple Silicon generations —
+especially **M2, M3 Pro, and M4 Pro**. One command, ~2–3 unattended hours:
+
+```bash
+git clone https://github.com/ommo007/FusionML.git && cd FusionML
+git checkout benchmarks
+./benchmarks/run_clean_suite.sh
+```
+
+Then open a PR with your `benchmarks/results/<your-chip>/` folder — the PR
+template guides you. Details: [`benchmarks/README.md`](benchmarks/README.md).
 
 ## How It Works
 

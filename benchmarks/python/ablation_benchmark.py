@@ -130,7 +130,7 @@ def run_ablation() -> Dict:
                 **flags
             )
             # Calibrate with all enabled backends
-            scheduler.calibrate(sizes=[size], verbose=False)
+            scheduler.calibrate(shapes=[size], verbose=False)
 
             stats = time_matmul(scheduler, size)
             size_results[config_name] = stats
@@ -184,23 +184,64 @@ if __name__ == "__main__":
 
     # Save results
     try:
-        import subprocess
-        cpu = "Unknown"
-        try:
-            r = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True)
-            cpu = r.stdout.strip().replace(" ", "_")
-        except:
-            pass
-            
-        out_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../results", cpu))
+        import subprocess, re
+
+        def _hw_slug():
+            cpu = "Unknown"
+            try:
+                r = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"],
+                                   capture_output=True, text=True)
+                cpu = r.stdout.strip()
+            except Exception:
+                pass
+            mem_gb = "?GB"
+            try:
+                r = subprocess.run(["sysctl", "-n", "hw.memsize"],
+                                   capture_output=True, text=True)
+                mem_gb = f"{int(r.stdout.strip()) // (1024 ** 3)}GB"
+            except Exception:
+                pass
+            cpu_cores = "?"
+            try:
+                r = subprocess.run(["sysctl", "-n", "hw.physicalcpu"],
+                                   capture_output=True, text=True)
+                v = r.stdout.strip()
+                if v.isdigit():
+                    cpu_cores = v
+            except Exception:
+                pass
+            gpu_cores = "?"
+            try:
+                r = subprocess.run(["ioreg", "-r", "-c", "AGXAccelerator"],
+                                   capture_output=True, text=True)
+                m = re.search(r'"gpu-core-count"\s*=\s*(\d+)', r.stdout)
+                if m:
+                    gpu_cores = m.group(1)
+            except Exception:
+                pass
+            _ANE = [
+                ("M1 Ultra", "32"), ("M2 Ultra", "32"), ("M3 Ultra", "36"), ("M4 Ultra", "64"),
+                ("M3 Pro", "18"), ("M3 Max", "18"), ("M4 Pro", "20"), ("M4 Max", "32"),
+            ]
+            ane_cores = "16"
+            for k, v in _ANE:
+                if k in cpu:
+                    ane_cores = v
+                    break
+            slug = f"{cpu}_{mem_gb}_{cpu_cores}CPU_{gpu_cores}GPU_{ane_cores}ANE".replace(" ", "_")
+            return cpu, slug
+
+        cpu_name, hw_slug = _hw_slug()
+        out_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../results", hw_slug))
         os.makedirs(out_dir, exist_ok=True)
-        
+
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         out_path = os.path.join(out_dir, f"ablation_{timestamp}.json")
         with open(out_path, "w") as f:
             json.dump({
                 "timestamp": timestamp,
-                "cpu": cpu,
+                "hardware_slug": hw_slug,
+                "cpu": cpu_name,
                 "sizes": SIZES,
                 "iterations": ITERATIONS,
                 "has_mlx": HAS_MLX,

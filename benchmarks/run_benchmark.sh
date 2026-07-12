@@ -7,6 +7,7 @@
 # ==============================================================================
 
 set -e
+export VECLIB_MAXIMUM_THREADS=4
 
 # ANSI Color Codes for Premium UI
 RED='\033[0;31m'
@@ -46,6 +47,8 @@ show_help() {
     echo -e "  ${GREEN}--ablation${NC}          Run scheduler ablation sweeps (MakeSpan routing accuracy)"
     echo -e "  ${GREEN}--throughput${NC}        Run NeurIPS device scaling throughput (ResNet-50 & BERT-base)"
     echo -e "  ${GREEN}--swift${NC}             Run Swift-native zero-copy parallel scheduler benchmarks"
+    echo -e "  ${GREEN}--e2e${NC}               Run end-to-end autoregressive generation benchmark (tokens/sec, prefill)"
+    echo -e "  ${GREEN}--fp16-ablation${NC}     Run FP16 x compile 2x2 ablation (separates precision vs graph-fusion gain)"
     echo -e "  ${GREEN}--collate${NC}           Collate result JSONs and auto-format LaTeX publication tables"
     echo -e "  ${GREEN}--help${NC}              Show this help menu"
     echo ""
@@ -58,6 +61,9 @@ RUN_H2H=false
 RUN_ABLATION=false
 RUN_THROUGHPUT=false
 RUN_SWIFT=false
+RUN_E2E=false
+RUN_FP16_ABLATION=false
+RUN_FP16_ABLATION_TRAINING=false
 RUN_COLLATE=false
 
 # Parse flags
@@ -82,6 +88,15 @@ if [ $# -gt 0 ]; then
                 ;;
             --swift)
                 RUN_SWIFT=true
+                ;;
+            --e2e)
+                RUN_E2E=true
+                ;;
+            --fp16-ablation)
+                RUN_FP16_ABLATION=true
+                ;;
+            --fp16-ablation-training)
+                RUN_FP16_ABLATION_TRAINING=true
                 ;;
             --collate)
                 RUN_COLLATE=true
@@ -181,6 +196,24 @@ run_swift() {
     swift run -c release BenchmarkExample
 }
 
+run_e2e() {
+    echo -e "${BOLD}${MAGENTA}▶ Running End-to-End Autoregressive Generation Benchmark (tokens/sec, prefill latency)...${NC}"
+    cd "$PYTHON_DIR"
+    python e2e_llama_generation.py
+}
+
+run_fp16_ablation() {
+    echo -e "${BOLD}${MAGENTA}▶ Running FP16 x Compile 2x2 Ablation Study (inference)...${NC}"
+    cd "$PYTHON_DIR"
+    python fp16_ablation.py
+}
+
+run_fp16_ablation_training() {
+    echo -e "${BOLD}${MAGENTA}▶ Running FP16 x Compile 2x2 Ablation Study (training)...${NC}"
+    cd "$PYTHON_DIR"
+    python fp16_ablation_training.py
+}
+
 run_collate() {
     echo -e "${BOLD}${MAGENTA}▶ Collating JSON results & generating LaTeX tables...${NC}"
     cd "$PYTHON_DIR"
@@ -199,6 +232,9 @@ if [ "$RUN_ALL" = true ]; then
     run_head_to_head
     run_ablation
     run_throughput
+    run_e2e
+    run_fp16_ablation
+    run_fp16_ablation_training
     run_swift
     run_collate
 else
@@ -206,6 +242,9 @@ else
     [ "$RUN_H2H" = true ] && run_head_to_head
     [ "$RUN_ABLATION" = true ] && run_ablation
     [ "$RUN_THROUGHPUT" = true ] && run_throughput
+    [ "$RUN_E2E" = true ] && run_e2e
+    [ "$RUN_FP16_ABLATION" = true ] && run_fp16_ablation
+    [ "$RUN_FP16_ABLATION_TRAINING" = true ] && run_fp16_ablation_training
     [ "$RUN_SWIFT" = true ] && run_swift
     [ "$RUN_COLLATE" = true ] && run_collate
 fi

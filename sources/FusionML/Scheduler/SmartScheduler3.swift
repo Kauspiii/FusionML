@@ -20,7 +20,9 @@ public final class SmartScheduler3: @unchecked Sendable {
     private var aneModels: [Int: MLModel] = [:]
     private let modelLock = NSLock()
     
-    private init() {}
+    private init() {
+        setenv("VECLIB_MAXIMUM_THREADS", "1", 1)
+    }
     
     // MARK: - Model Loading
     
@@ -66,20 +68,16 @@ public final class SmartScheduler3: @unchecked Sendable {
         let aArray = try MLMultiArray(shape: [M, K] as [NSNumber], dataType: .float16)
         let bArray = try MLMultiArray(shape: [K, N] as [NSNumber], dataType: .float16)
         
-        // Convert Float to Float16 during copy
+        // Convert Float to Float16 during copy (SIMD-accelerated)
         aArray.withUnsafeMutableBytes { ptr, strides in
             let dest = ptr.baseAddress!.assumingMemoryBound(to: Float16.self)
             let src = a.buffer.pointer.assumingMemoryBound(to: Float.self)
-            for i in 0..<(M * K) {
-                dest[i] = Float16(src[i])
-            }
+            GPUEngine.convertFP32ToFP16(src: src, dst: dest, count: M * K)
         }
         bArray.withUnsafeMutableBytes { ptr, strides in
             let dest = ptr.baseAddress!.assumingMemoryBound(to: Float16.self)
             let src = b.buffer.pointer.assumingMemoryBound(to: Float.self)
-            for i in 0..<(K * N) {
-                dest[i] = Float16(src[i])
-            }
+            GPUEngine.convertFP32ToFP16(src: src, dst: dest, count: K * N)
         }
         
         let input = try MLDictionaryFeatureProvider(dictionary: [
@@ -96,12 +94,10 @@ public final class SmartScheduler3: @unchecked Sendable {
         let result = try Tensor(shape: [M, N], dtype: .float32)
         let ptr = result.buffer.pointer.bindMemory(to: Float.self, capacity: M * N)
         
-        // Convert Float16 back to Float
+        // Convert Float16 back to Float (SIMD-accelerated)
         resultArray.withUnsafeBytes { ptrBuffer in
             let src = ptrBuffer.baseAddress!.assumingMemoryBound(to: Float16.self)
-            for i in 0..<(M * N) {
-                ptr[i] = Float(src[i])
-            }
+            GPUEngine.convertFP16ToFP32(src: src, dst: ptr, count: M * N)
         }
         
         return result
@@ -126,7 +122,9 @@ public final class SmartScheduler3: @unchecked Sendable {
             
             // GPU
             let gpuTime = try measureBackend {
-                try GPUEngine.shared.matmulMPS(a, b)
+                let res = try GPUEngine.shared.matmulMPS(a, b)
+                GPUEngine.shared.sync()
+                return res
             }
             recordProfile(key: key, backend: .gpu, timeMs: gpuTime)
             let gpuGFLOPS = (2.0 * Double(size * size * size) / gpuTime) / 1_000_000
@@ -144,10 +142,46 @@ public final class SmartScheduler3: @unchecked Sendable {
                 print("  ⚠️ ANE error for \(size)×\(size): \(msg)")
             }
             
+            // Empirical co-execution validation:
+            // Measure actual split time. If it is slower than the fastest single backend,
+            // override the profiles to default to the fastest single engine.
+            var splitTime = Double.infinity
+            do {
+                splitTime = try measureBackend {
+                    let res = try self.smartMatmul(a, b)
+                    GPUEngine.shared.sync()
+                    return res
+                }
+            } catch {}
+            
+            let bestSingleTime = min(cpuTime, gpuTime)
+            if splitTime > bestSingleTime * 1.03 {
+                let fastest: HardwareBackend = gpuTime <= cpuTime ? .gpu : .cpu
+                overrideToFastest(key: key, fastest: fastest, timeMs: bestSingleTime)
+            }
+            
             print("  \(size)×\(size): CPU \(String(format: "%.0f", cpuGFLOPS)), GPU \(String(format: "%.0f", gpuGFLOPS)), ANE \(String(format: "%.0f", aneGFLOPS)) GFLOPS")
         }
         
         print("✅ Calibration complete!")
+    }
+    
+    private func overrideToFastest(key: String, fastest: HardwareBackend, timeMs: Double) {
+        lock.lock()
+        defer { lock.unlock() }
+        if var bDict = profiles[key] {
+            for backend in HardwareBackend.allCases {
+                if var profile = bDict[backend] {
+                    if backend == fastest {
+                        profile.samples = [timeMs]
+                    } else {
+                        profile.samples = []
+                    }
+                    bDict[backend] = profile
+                }
+            }
+            profiles[key] = bDict
+        }
     }
     
     private func measureBackend<T>(_ operation: () throws -> T) throws -> Double {
@@ -195,6 +229,7 @@ public final class SmartScheduler3: @unchecked Sendable {
     
     public func smartMatmul(_ a: Tensor, _ b: Tensor) throws -> Tensor {
         let M = a.shape[0]
+        let K = a.shape[1]
         let N = b.shape[1]
         
         // For small matrices, use single backend
@@ -203,52 +238,124 @@ public final class SmartScheduler3: @unchecked Sendable {
         }
         
         // Get split ratios
-        let (cpuRatio, gpuRatio, aneRatio) = optimalSplitRatio(for: M)
+        var (cpuRatio, gpuRatio, aneRatio) = optimalSplitRatio(for: M)
+        
+        // If ANE model is not loaded/compiled, or matrix dimensions are not square, we cannot run ANE matmul. Disable ANE and redistribute to CPU/GPU.
+        var activeANERatio = aneRatio
+        var activeCPURatio = cpuRatio
+        var activeGPURatio = gpuRatio
+        
+        let isSquare = (K == M && N == M)
+        if aneModels[M] == nil || !isSquare {
+            activeANERatio = 0.0
+            let sum = cpuRatio + gpuRatio
+            if sum > 0 {
+                activeCPURatio = cpuRatio / sum
+                activeGPURatio = gpuRatio / sum
+            } else {
+                activeGPURatio = 1.0
+            }
+        }
+        
+        // Apply 10% threshold filter to prevent allocating negligible work to any backend
+        if activeCPURatio < 0.1 && activeCPURatio > 0 {
+            let sum = activeGPURatio + activeANERatio
+            if sum > 0 {
+                activeGPURatio /= sum
+                activeANERatio /= sum
+            }
+            activeCPURatio = 0.0
+        }
+        if activeGPURatio < 0.1 && activeGPURatio > 0 {
+            let sum = activeCPURatio + activeANERatio
+            if sum > 0 {
+                activeCPURatio /= sum
+                activeANERatio /= sum
+            }
+            activeGPURatio = 0.0
+        }
+        if activeANERatio < 0.1 && activeANERatio > 0 {
+            let sum = activeCPURatio + activeGPURatio
+            if sum > 0 {
+                activeCPURatio /= sum
+                activeGPURatio /= sum
+            }
+            activeANERatio = 0.0
+        }
         
         // If one backend dominates (>80%), just use it
-        if cpuRatio > 0.8 { return try Tensor.matmul(a, b) }
-        if gpuRatio > 0.8 { return try GPUEngine.shared.matmulMPS(a, b) }
-        if aneRatio > 0.8, aneModels[M] != nil { return try aneMatmul(a, b) }
+        if activeCPURatio > 0.8 { return try Tensor.matmul(a, b) }
+        if activeGPURatio > 0.8 { return try GPUEngine.shared.matmulMPS(a, b) }
+        if activeANERatio > 0.8 { return try aneMatmul(a, b) }
         
         // Calculate row splits
-        let cpuRows = Int(Double(M) * cpuRatio)
-        let gpuRows = Int(Double(M) * gpuRatio)
-        let aneRows = M - cpuRows - gpuRows
+        // Calculate row splits and align to multiple of 16 for optimal AMX and MPS execution tiling
+        var cpuRows = Int(Double(M) * activeCPURatio)
+        var gpuRows = Int(Double(M) * activeGPURatio)
+        var aneRows = Int(Double(M) * activeANERatio)
+        
+        if M >= 16 {
+            cpuRows = ((cpuRows + 8) / 16) * 16
+            gpuRows = ((gpuRows + 8) / 16) * 16
+            aneRows = M - cpuRows - gpuRows
+            if aneRows < 0 {
+                if cpuRows >= -aneRows {
+                    cpuRows += aneRows
+                } else if gpuRows >= -aneRows {
+                    gpuRows += aneRows
+                }
+                aneRows = 0
+            }
+        } else {
+            let remainder = M - cpuRows - gpuRows - aneRows
+            if remainder > 0 {
+                if activeGPURatio >= activeCPURatio {
+                    gpuRows += remainder
+                } else {
+                    cpuRows += remainder
+                }
+            }
+        }
+        
+        // Sync pending GPU writes to ensure inputs a and b are fully populated in unified memory before CPU/ANE access
+        if a.isDirty || b.isDirty {
+            GPUEngine.shared.commitActiveCommandBuffer()
+            GPUEngine.shared.waitOnLastCommandBuffer()
+            a.isDirty = false
+            b.isDirty = false
+        }
         
         let result = try Tensor(shape: [M, N], dtype: a.dtype)
         let group = DispatchGroup()
         let threadErrors = ThreadSafeErrors()
         
-        // Bind pointers and extract buffers on the caller thread
-        let aPtr = a.buffer.pointer.bindMemory(to: Float.self, capacity: a.count)
-        let bPtr = b.buffer.pointer.bindMemory(to: Float.self, capacity: b.count)
-        let rPtr = result.buffer.pointer.bindMemory(to: Float.self, capacity: result.count)
+        // Use _buffer directly to avoid the buffer getter's auto-sync (we already synced above).
+        let aPtr = a._buffer.pointer.bindMemory(to: Float.self, capacity: a.count)
+        let bPtr = b._buffer.pointer.bindMemory(to: Float.self, capacity: b.count)
+        let rPtr = result._buffer.pointer.bindMemory(to: Float.self, capacity: result.count)
         
         let aMetal = a.metalBuffer
         let bMetal = b.metalBuffer
         let rMetal = result.metalBuffer
         
-        let K = a.shape[1]
-
-        // GPU portion (rows cpuRows..<cpuRows+gpuRows)
+        
+        // GPU portion (rows cpuRows..<cpuRows+gpuRows) - enqueued asynchronously on current thread
         if gpuRows > 0 {
-            group.enter()
-            DispatchQueue.global(qos: .userInitiated).async { [aMetal, bMetal, rMetal] in
-                do {
-                    try GPUEngine.shared.matmulRawMPS(
-                        a: aMetal,
-                        b: bMetal,
-                        result: rMetal,
-                        M: gpuRows,
-                        N: N,
-                        K: K,
-                        aOffset: cpuRows * K * 4,
-                        resultOffset: cpuRows * N * 4
-                    )
-                } catch {
-                    threadErrors.append(error)
-                }
-                group.leave()
+            do {
+                try GPUEngine.shared.matmulRawMPS(
+                    a: aMetal,
+                    b: bMetal,
+                    result: rMetal,
+                    M: gpuRows,
+                    N: N,
+                    K: K,
+                    aOffset: cpuRows * K * 4,
+                    resultOffset: cpuRows * N * 4,
+                    waitUntilCompleted: false
+                )
+                GPUEngine.shared.commitActiveCommandBuffer()
+            } catch {
+                threadErrors.append(error)
             }
         }
 
@@ -289,17 +396,19 @@ public final class SmartScheduler3: @unchecked Sendable {
             }
         }
         
-        // CPU portion (rows 0..<cpuRows) - runs synchronously in parallel with GPU/ANE
+        // CPU portion (runs directly on the calling thread in parallel with GPU/ANE co-execution)
         if cpuRows > 0 {
             cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                        Int32(cpuRows), Int32(N), Int32(K), 1.0,
                        aPtr, Int32(K), bPtr, Int32(N), 0.0, rPtr, Int32(N))
         }
         
+        // Wait for ANE portion to complete (if any ANE work was dispatched)
         group.wait()
         
         try threadErrors.check()
         
+        result.isDirty = true
         return result
     }
     

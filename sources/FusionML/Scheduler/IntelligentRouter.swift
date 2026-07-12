@@ -9,6 +9,7 @@ import Accelerate
 public enum SiliconOperation {
     case matmul(Tensor, Tensor)
     case add(Tensor, Tensor)
+    case mul(Tensor, Tensor)
     case relu(Tensor)
     case gelu(Tensor)
     case softmax(Tensor, axis: Int)
@@ -65,6 +66,28 @@ public final class IntelligentRouter: @unchecked Sendable {
     
     private init() {}
     
+    // MARK: - Forward Pass Batching
+    
+    /// Begin a batched forward pass. All GPU operations will be accumulated into
+    /// a single command buffer instead of committing per-operation.
+    /// This eliminates ~100μs of Metal driver overhead per op.
+    public func startForwardPass() {
+        GPUEngine.shared.startBatch()
+    }
+    
+    /// End the batched forward pass and commit all accumulated GPU work.
+    public func endForwardPass() {
+        GPUEngine.shared.commitBatch()
+    }
+    
+    /// Execute a block of operations within a batched forward pass.
+    /// Automatically handles startBatch/commitBatch lifecycle.
+    public func batched<T>(_ block: () throws -> T) rethrows -> T {
+        startForwardPass()
+        defer { endForwardPass() }
+        return try block()
+    }
+    
     // MARK: - Intelligent Routing
     
     /// Route an operation to the best backend
@@ -80,7 +103,7 @@ public final class IntelligentRouter: @unchecked Sendable {
         switch op {
         case .matmul(let a, _):
             return routeMatmul(size: a.count)
-        case .add(let a, _), .relu(let a), .gelu(let a):
+        case .add(let a, _), .mul(let a, _), .relu(let a), .gelu(let a):
             return routeElementwise(size: a.count)
         case .softmax(let a, _):
             return routeSoftmax(size: a.count)
@@ -102,24 +125,17 @@ public final class IntelligentRouter: @unchecked Sendable {
             )
         }
         
-        // Heuristic: CPU for small, GPU for large
-        if size < 250000 {  // ~500x500
+        // Heuristic: CPU for very small, GPU for others
+        if size < 100000 {  // ~300x300
             return RoutingDecision(
                 backend: .cpu,
-                reason: "Small matrix: CPU (AMX) has lower overhead",
+                reason: "Very small matrix: CPU (AMX) has lower overhead",
                 expectedSpeedup: 1.0
-            )
-        } else if size < 4_000_000 {  // ~2000x2000
-            // Use proportional split
-            return RoutingDecision(
-                backend: .gpu,  // Will trigger smart split
-                reason: "Medium matrix: GPU+CPU proportional split",
-                expectedSpeedup: 1.4
             )
         } else {
             return RoutingDecision(
                 backend: .gpu,
-                reason: "Large matrix: GPU optimal",
+                reason: "GPU optimal / split eligible",
                 expectedSpeedup: 1.0
             )
         }
@@ -166,24 +182,51 @@ public final class IntelligentRouter: @unchecked Sendable {
     // MARK: - Execute with Routing
     
     /// Execute matmul with intelligent routing
-    public func matmul(_ a: Tensor, _ b: Tensor) throws -> Tensor {
+    /// Execute matmul with intelligent routing
+    public func matmul(_ a: Tensor, _ b: Tensor, transposeLeft: Bool = false, transposeRight: Bool = false, isWeightGrad: Bool = false, forceGPU: Bool = false, forceCPU: Bool = false) throws -> Tensor {
+        if isWeightGrad {
+            return try GPUEngine.shared.matmulMPS(a, b, transposeLeft: transposeLeft, transposeRight: transposeRight)
+        }
+        
+        if a.count >= 4000000 {
+            setenv("VECLIB_MAXIMUM_THREADS", "4", 1)
+        } else if a.count >= 1500000 {
+            setenv("VECLIB_MAXIMUM_THREADS", "2", 1)
+        } else {
+            setenv("VECLIB_MAXIMUM_THREADS", "1", 1)
+        }
+
+        if forceCPU {
+            return try executeCPUMatmul(a, b)
+        }
+        
+        // Only bypass if forceGPU is explicitly requested
+        if forceGPU {
+            return try GPUEngine.shared.matmulMPS(a, b, transposeLeft: transposeLeft, transposeRight: transposeRight)
+        }
+        
         let decision = route(.matmul(a, b))
         
         switch decision.backend {
         case .cpu:
+            if transposeLeft || transposeRight {
+                return try GPUEngine.shared.matmulMPS(a, b, transposeLeft: transposeLeft, transposeRight: transposeRight)
+            }
             return try executeCPUMatmul(a, b)
         case .gpu:
-            // Use smart split for medium/large matrices
-            if enableSplitting && a.count > 250000 {
-                if useThreeWaySplit {
-                    return try SmartScheduler3.shared.smartMatmul(a, b)
-                } else {
-                    return try SmartScheduler.shared.smartMatmul(a, b)
-                }
+            // Use smart split for large matrices (>= 1.5M elements) to avoid overhead on small ones.
+            // The SmartScheduler handles isDirty sync internally with a lightweight commit+wait
+            // instead of bypassing splitting entirely.
+            // Allow transposeRight (used in backward activation gradients) since SmartScheduler supports it.
+            // Block transposeLeft since that changes row-splitting semantics.
+            if enableSplitting && a.count >= 1500000 && !transposeLeft {
+                return try SmartScheduler.shared.smartMatmul(a, b, transposeRight: transposeRight)
             }
-            return try GPUEngine.shared.matmulMPS(a, b)
+            return try GPUEngine.shared.matmulMPS(a, b, transposeLeft: transposeLeft, transposeRight: transposeRight)
         case .ane:
-            // Fall back to CPU - ANE not optimal for matmul
+            if transposeLeft || transposeRight {
+                return try GPUEngine.shared.matmulMPS(a, b, transposeLeft: transposeLeft, transposeRight: transposeRight)
+            }
             return try executeCPUMatmul(a, b)
         }
     }
@@ -194,55 +237,53 @@ public final class IntelligentRouter: @unchecked Sendable {
     
     /// Execute element-wise add with routing
     public func add(_ a: Tensor, _ b: Tensor) throws -> Tensor {
-        let decision = route(.add(a, b))
-        
-        switch decision.backend {
-        case .gpu:
+        if a.isDirty || b.isDirty || route(.add(a, b)).backend == .gpu {
             return try GPUEngine.shared.add(a, b)
-        default:
-            return try Tensor.add(a, b)
         }
+        return try Tensor.add(a, b)
+    }
+    
+    /// Execute element-wise mul with routing
+    public func mul(_ a: Tensor, _ b: Tensor) throws -> Tensor {
+        if a.isDirty || b.isDirty || route(.mul(a, b)).backend == .gpu {
+            return try GPUEngine.shared.mul(a, b)
+        }
+        return try Tensor.mul(a, b)
     }
     
     /// Execute ReLU with routing
     public func relu(_ x: Tensor) throws -> Tensor {
-        let decision = route(.relu(x))
-        
-        switch decision.backend {
-        case .gpu:
+        if x.isDirty || route(.relu(x)).backend == .gpu {
             return try GPUEngine.shared.relu(x)
-        default:
-            // CPU ReLU using Accelerate
-            let result = try Tensor(shape: x.shape, dtype: x.dtype)
-            let count = Int32(x.count)
-            let xPtr = x.buffer.pointer.bindMemory(to: Float.self, capacity: x.count)
-            let rPtr = result.buffer.pointer.bindMemory(to: Float.self, capacity: result.count)
-            var zero: Float = 0
-            vDSP_vthres(xPtr, 1, &zero, rPtr, 1, vDSP_Length(count))
-            return result
         }
+        
+        // CPU ReLU using Accelerate
+        let result = try Tensor(shape: x.shape, dtype: x.dtype)
+        let count = Int32(x.count)
+        let xPtr = x.buffer.pointer.bindMemory(to: Float.self, capacity: x.count)
+        let rPtr = result.buffer.pointer.bindMemory(to: Float.self, capacity: result.count)
+        var zero: Float = 0
+        vDSP_vthres(xPtr, 1, &zero, rPtr, 1, vDSP_Length(count))
+        return result
     }
     
     /// Execute GELU with routing
     public func gelu(_ x: Tensor) throws -> Tensor {
-        let decision = route(.gelu(x))
-        
-        switch decision.backend {
-        case .gpu:
+        if x.isDirty || route(.gelu(x)).backend == .gpu {
             return try GPUEngine.shared.gelu(x)
-        default:
-            // CPU GELU
-            let result = try Tensor(shape: x.shape, dtype: x.dtype)
-            let xData = x.toArray()
-            let rPtr = result.buffer.pointer.bindMemory(to: Float.self, capacity: result.count)
-            
-            for i in 0..<x.count {
-                let val = xData[i]
-                let cdf = 0.5 * (1 + tanh(0.7978845608 * (val + 0.044715 * val * val * val)))
-                rPtr[i] = val * Float(cdf)
-            }
-            return result
         }
+        
+        // CPU GELU
+        let result = try Tensor(shape: x.shape, dtype: x.dtype)
+        let xData = x.toArray()
+        let rPtr = result.buffer.pointer.bindMemory(to: Float.self, capacity: result.count)
+        
+        for i in 0..<x.count {
+            let val = xData[i]
+            let cdf = 0.5 * (1 + tanh(0.7978845608 * (val + 0.044715 * val * val * val)))
+            rPtr[i] = val * Float(cdf)
+        }
+        return result
     }
     
     // MARK: - Learning

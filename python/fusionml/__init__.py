@@ -11,6 +11,7 @@ from . import optim
 from . import autograd
 from . import functional as F
 from ._metal import device_info
+from .smart_matmul import smart_matmul, TriComputeMatmul, prewarm_ane_shape, is_ane_prewarmed
 
 def init():
     """Initialize FusionML backend"""

@@ -45,13 +45,28 @@ public final class SmartScheduler: @unchecked Sendable {
     // Calibration status
     private var isCalibrated = false
     
-    private init() {}
+    private init() {
+        setenv("VECLIB_MAXIMUM_THREADS", "1", 1)
+    }
     
     // MARK: - Calibration
     
     /// Calibrate by measuring actual backend performance and sweeping concurrent split ratios
     public func calibrate(sizes: [Int] = [256, 512, 1024, 2048]) throws {
         print("📐 Calibrating SmartScheduler...")
+        
+        // Ramping up the DVFS frequencies (warmup)
+        print("🔥 Ramping up hardware frequencies (warmup)...")
+        for _ in 0..<30 {
+            try autoreleasepool {
+                let wa = try Tensor.random([1024, 1024])
+                let wb = try Tensor.random([1024, 1024])
+                _ = try Tensor.matmul(wa, wb)
+                _ = try GPUEngine.shared.matmulMPS(wa, wb)
+                GPUEngine.shared.sync()
+            }
+        }
+        MemoryManager.shared.clearPool()
         
         for size in sizes {
             try autoreleasepool {
@@ -68,37 +83,40 @@ public final class SmartScheduler: @unchecked Sendable {
                 
                 // Measure GPU (MPS)
                 let gpuTime = try measureBackend(.gpu, size: size) {
-                    try GPUEngine.shared.matmulMPS(a, b)
+                    let res = try GPUEngine.shared.matmulMPS(a, b)
+                    GPUEngine.shared.sync()
+                    return res
                 }
                 recordProfile(key: key, backend: .gpu, timeMs: gpuTime)
                 
                 let cpuGFLOPS = (2.0 * Double(size * size * size) / cpuTime) / 1_000_000
                 let gpuGFLOPS = (2.0 * Double(size * size * size) / gpuTime) / 1_000_000
                 
-                // Localized search sweep around the theoretical ratio to maximize efficiency
+                // Base split ratio on theoretical throughputs
                 let cpuThroughput = 1.0 / cpuTime
                 let gpuThroughput = 1.0 / gpuTime
                 let total = cpuThroughput + gpuThroughput
-                
                 let theoreticalRatio = cpuThroughput / total
-                var bestRatio = theoreticalRatio
-                var minTime = Double.infinity
                 
-                let startRatio = max(0.05, theoreticalRatio - 0.15)
-                let endRatio = min(0.95, theoreticalRatio + 0.15)
+                // Sweep ratios around theoretical ratio to find actual best
+                var candidateRatios = [0.0]
+                if theoreticalRatio > 0.02 {
+                    let r = theoreticalRatio
+                    candidateRatios.append(max(0.02, r - 0.12))
+                    candidateRatios.append(max(0.02, r - 0.06))
+                    candidateRatios.append(r)
+                    candidateRatios.append(min(0.55, r + 0.06))
+                    candidateRatios.append(min(0.55, r + 0.12))
+                }
                 
-                // Fine-grained localized sweep to find the physical optimum
-                for r in stride(from: startRatio, through: endRatio, by: 0.03) {
-                    autoreleasepool {
-                        do {
-                            let testTime = try measureSplit(a, b, cpuRatio: r)
-                            if testTime < minTime {
-                                minTime = testTime
-                                bestRatio = r
-                            }
-                        } catch {
-                            // Ignore
-                        }
+                var bestRatio = 0.0
+                var minTime = gpuTime
+                
+                for ratio in candidateRatios {
+                    let time = try measureSplit(a, b, cpuRatio: ratio)
+                    if time < minTime {
+                        minTime = time
+                        bestRatio = ratio
                     }
                 }
                 
@@ -121,6 +139,20 @@ public final class SmartScheduler: @unchecked Sendable {
     /// Calibrate shapes by measuring actual performance and sweeping split ratios
     public func calibrateShapes(_ shapes: [(M: Int, N: Int, K: Int)]) throws {
         print("📐 Calibrating SmartScheduler Shapes...")
+        
+        // Ramping up the DVFS frequencies (warmup)
+        print("🔥 Ramping up hardware frequencies (warmup)...")
+        for _ in 0..<30 {
+            try autoreleasepool {
+                let wa = try Tensor.random([1024, 1024])
+                let wb = try Tensor.random([1024, 1024])
+                _ = try Tensor.matmul(wa, wb)
+                _ = try GPUEngine.shared.matmulMPS(wa, wb)
+                GPUEngine.shared.sync()
+            }
+        }
+        MemoryManager.shared.clearPool()
+        
         for shape in shapes {
             try autoreleasepool {
                 let M = shape.M
@@ -139,30 +171,37 @@ public final class SmartScheduler: @unchecked Sendable {
                 
                 // Measure GPU
                 let gpuTime = try measureBackend(.gpu, size: M) {
-                    try GPUEngine.shared.matmulMPS(a, b)
+                    let res = try GPUEngine.shared.matmulMPS(a, b)
+                    GPUEngine.shared.sync()
+                    return res
                 }
                 recordProfile(key: key, backend: .gpu, timeMs: gpuTime)
                 
+                // Base split ratio on theoretical throughputs
                 let cpuThroughput = 1.0 / cpuTime
                 let gpuThroughput = 1.0 / gpuTime
                 let total = cpuThroughput + gpuThroughput
                 let theoreticalRatio = cpuThroughput / total
                 
-                var bestRatio = theoreticalRatio
-                var minTime = Double.infinity
+                // Sweep ratios around theoretical ratio to find actual best
+                var candidateRatios = [0.0]
+                if theoreticalRatio > 0.02 {
+                    let r = theoreticalRatio
+                    candidateRatios.append(max(0.02, r - 0.12))
+                    candidateRatios.append(max(0.02, r - 0.06))
+                    candidateRatios.append(r)
+                    candidateRatios.append(min(0.55, r + 0.06))
+                    candidateRatios.append(min(0.55, r + 0.12))
+                }
                 
-                let startRatio = max(0.05, theoreticalRatio - 0.15)
-                let endRatio = min(0.95, theoreticalRatio + 0.15)
+                var bestRatio = 0.0
+                var minTime = gpuTime
                 
-                for r in stride(from: startRatio, through: endRatio, by: 0.03) {
-                    autoreleasepool {
-                        do {
-                            let testTime = try measureSplit(a, b, cpuRatio: r)
-                            if testTime < minTime {
-                                minTime = testTime
-                                bestRatio = r
-                            }
-                        } catch {}
+                for ratio in candidateRatios {
+                    let time = try measureSplit(a, b, cpuRatio: ratio)
+                    if time < minTime {
+                        minTime = time
+                        bestRatio = ratio
                     }
                 }
                 
@@ -190,26 +229,29 @@ public final class SmartScheduler: @unchecked Sendable {
         
         // Measure
         let start = CFAbsoluteTimeGetCurrent()
-        for _ in 0..<5 {
+        let iterations = 10
+        for _ in 0..<iterations {
             _ = try operation()
         }
-        return (CFAbsoluteTimeGetCurrent() - start) * 1000 / 5
+        return (CFAbsoluteTimeGetCurrent() - start) * 1000 / Double(iterations)
     }
     
     private func measureSplit(_ a: Tensor, _ b: Tensor, cpuRatio: Double) throws -> Double {
         // Warmup
-        for _ in 0..<2 {
+        for _ in 0..<3 {
             try autoreleasepool {
                 _ = try smartMatmulWithRatio(a, b, cpuRatio: cpuRatio)
+                GPUEngine.shared.sync()
             }
         }
         
         // Measure
         let start = CFAbsoluteTimeGetCurrent()
-        let iterations = 3
+        let iterations = 10
         for _ in 0..<iterations {
             try autoreleasepool {
                 _ = try smartMatmulWithRatio(a, b, cpuRatio: cpuRatio)
+                GPUEngine.shared.sync()
             }
         }
         return (CFAbsoluteTimeGetCurrent() - start) * 1000 / Double(iterations)
@@ -257,102 +299,121 @@ public final class SmartScheduler: @unchecked Sendable {
     // MARK: - Intelligent Matmul
     
     /// Matrix multiply with intelligent proportional splitting
-    public func smartMatmul(_ a: Tensor, _ b: Tensor) throws -> Tensor {
+    public func smartMatmul(_ a: Tensor, _ b: Tensor, transposeLeft: Bool = false, transposeRight: Bool = false) throws -> Tensor {
         guard a.ndim == 2 && b.ndim == 2 else {
             throw MemoryError.invalidShape
         }
-        guard a.shape[1] == b.shape[0] else {
+        
+        let M = transposeLeft ? a.shape[1] : a.shape[0]
+        let K = transposeLeft ? a.shape[0] : a.shape[1]
+        let N = transposeRight ? b.shape[0] : b.shape[1]
+        let expectedK = transposeRight ? b.shape[1] : b.shape[0]
+        
+        guard K == expectedK else {
             throw MemoryError.invalidShape
         }
         
-        let M = a.shape[0]
-        let N = b.shape[1]
-        let K = a.shape[1]
-        
         // For small matrices, use single best backend
         if M < 512 {
-            return try Tensor.matmul(a, b)  // CPU is usually best for small
+            return try GPUEngine.shared.matmulMPS(a, b, transposeLeft: transposeLeft, transposeRight: transposeRight)
         }
         
         // Get optimal split ratio
         let (cpuRatio, _) = optimalSplitRatio(for: M, N: N, K: K)
-        return try smartMatmulWithRatio(a, b, cpuRatio: cpuRatio)
+        return try smartMatmulWithRatio(a, b, cpuRatio: cpuRatio, transposeLeft: transposeLeft, transposeRight: transposeRight)
     }
     
-    private func smartMatmulWithRatio(_ a: Tensor, _ b: Tensor, cpuRatio: Double) throws -> Tensor {
-        let M = a.shape[0]
-        let N = b.shape[1]
-        let K = a.shape[1]
+    private func smartMatmulWithRatio(_ a: Tensor, _ b: Tensor, cpuRatio: Double, transposeLeft: Bool = false, transposeRight: Bool = false) throws -> Tensor {
+        let M = transposeLeft ? a.shape[1] : a.shape[0]
+        let K = transposeLeft ? a.shape[0] : a.shape[1]
+        let N = transposeRight ? b.shape[0] : b.shape[1]
         
-        let cpuRows = Int(Double(M) * cpuRatio)
+        var cpuRows = Int(Double(M) * cpuRatio)
+        if M >= 16 {
+            cpuRows = ((cpuRows + 8) / 16) * 16
+            cpuRows = max(0, min(M, cpuRows))
+        }
         let gpuRows = M - cpuRows
         
         // If one backend dominates, just use it
-        if cpuRatio > 0.95 {
+        if cpuRows == M {
+            if transposeLeft || transposeRight {
+                return try GPUEngine.shared.matmulMPS(a, b, transposeLeft: transposeLeft, transposeRight: transposeRight)
+            }
             return try Tensor.matmul(a, b)
         }
-        if cpuRatio < 0.05 {
-            return try GPUEngine.shared.matmulMPS(a, b)
+        if cpuRows == 0 {
+            return try GPUEngine.shared.matmulMPS(a, b, transposeLeft: transposeLeft, transposeRight: transposeRight)
+        }
+        
+        // Ensure pending GPU writes to inputs are complete before CPU reads.
+        // On Apple Silicon unified memory, committed GPU writes are coherent — no copies needed.
+        // We use commitActiveCommandBuffer() + targeted wait instead of the heavy sync() which would stall all work.
+        var prevCommandBuffer: MTLCommandBuffer? = nil
+        if a.isDirty || b.isDirty {
+            GPUEngine.shared.commitActiveCommandBuffer()
+            prevCommandBuffer = GPUEngine.shared.lastCommittedBuffer
+            a.isDirty = false
+            b.isDirty = false
         }
         
         let result = try Tensor(shape: [M, N], dtype: a.dtype)
-        let group = DispatchGroup()
-        var gpuError: Error?
         
-        // Bind pointers and extract buffers on the caller thread
-        let aPtr = a.buffer.pointer.bindMemory(to: Float.self, capacity: a.count)
-        let bPtr = b.buffer.pointer.bindMemory(to: Float.self, capacity: b.count)
-        let rPtr = result.buffer.pointer.bindMemory(to: Float.self, capacity: result.count)
+        // Use _buffer directly to avoid the buffer getter's auto-sync (we already synced above).
+        let aPtr = a._buffer.pointer.bindMemory(to: Float.self, capacity: a.count)
+        let bPtr = b._buffer.pointer.bindMemory(to: Float.self, capacity: b.count)
+        let rPtr = result._buffer.pointer.bindMemory(to: Float.self, capacity: result.count)
         
         let aMetal = a.metalBuffer
         let bMetal = b.metalBuffer
         let rMetal = result.metalBuffer
         
-        // GPU portion
+        // GPU portion (enqueue asynchronously on calling thread)
         if gpuRows > 0 {
-            group.enter()
-            DispatchQueue.global(qos: .userInitiated).async { [aMetal, bMetal, rMetal] in
-                do {
-                    try GPUEngine.shared.matmulRawMPS(
-                        a: aMetal,
-                        b: bMetal,
-                        result: rMetal,
-                        M: gpuRows,
-                        N: N,
-                        K: K,
-                        aOffset: cpuRows * K * 4,
-                        resultOffset: cpuRows * N * 4
-                    )
-                } catch {
-                    gpuError = error
-                }
-                group.leave()
-            }
+            try GPUEngine.shared.matmulRawMPS(
+                a: aMetal,
+                b: bMetal,
+                result: rMetal,
+                M: gpuRows,
+                N: N,
+                K: K,
+                aOffset: transposeLeft ? cpuRows * 4 : cpuRows * K * 4,
+                resultOffset: cpuRows * N * 4,
+                transposeLeft: transposeLeft,
+                transposeRight: transposeRight,
+                waitUntilCompleted: false
+            )
+            GPUEngine.shared.commitActiveCommandBuffer()
         }
         
-        // CPU portion (runs synchronously on caller thread in parallel with GPU)
+        // Wait for the previous command buffer (which wrote to inputs) to complete before CPU reads them.
+        if let prevCb = prevCommandBuffer, prevCb.status != .completed {
+            prevCb.waitUntilCompleted()
+        }
+        
+        // CPU portion (runs directly on the calling thread in parallel with the GPU)
         if cpuRows > 0 {
+            let transA = transposeLeft ? CblasTrans : CblasNoTrans
+            let transB = transposeRight ? CblasTrans : CblasNoTrans
+            let lda = transposeLeft ? Int32(M) : Int32(K)
+            let ldb = transposeRight ? Int32(K) : Int32(N)
+            
             cblas_sgemm(
                 CblasRowMajor,
-                CblasNoTrans,
-                CblasNoTrans,
+                transA,
+                transB,
                 Int32(cpuRows),
                 Int32(N),
                 Int32(K),
                 1.0,
-                aPtr, Int32(K),  // First cpuRows rows of A
-                bPtr, Int32(N),
+                aPtr, lda,
+                bPtr, ldb,
                 0.0,
-                rPtr, Int32(N)   // First cpuRows rows of result
+                rPtr, Int32(N)
             )
         }
         
-        group.wait()
-        
-        if let error = gpuError {
-            throw error
-        }
-        
+        result.isDirty = true
         return result
     }
     

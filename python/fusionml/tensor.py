@@ -382,6 +382,21 @@ class Tensor:
         result._ctx = ('transpose', self) if result.requires_grad else None
         result.grad = None
         return result
+
+    def transpose(self, *axes) -> 'Tensor':
+        if len(axes) == 1 and isinstance(axes[0], (list, tuple)):
+            axes = axes[0]
+        if self._on_gpu:
+            result = Tensor.__new__(Tensor)
+            result._mlx = mx.transpose(self._mlx, axes)
+            result._np = None
+            result._on_gpu = True
+        else:
+            result = Tensor(np.transpose(self._np, axes))
+        result.requires_grad = self.requires_grad
+        result._ctx = ('transpose', self) if result.requires_grad else None
+        result.grad = None
+        return result
     
     def reshape(self, *shape) -> 'Tensor':
         if len(shape) == 1 and isinstance(shape[0], (list, tuple)):
@@ -421,7 +436,7 @@ def matmul(a: Tensor, b: Tensor) -> Tensor:
         K = a.shape[1] if len(a.shape) > 1 else 1
         N = b.shape[1] if len(b.shape) > 1 else 1
         min_dim = min(M, K, N)
-        if HAS_TRI and min_dim >= 1024:
+        if True:  # Enable Python-side zero-copy CPU-GPU co-execution
             scheduler = _get_tri_scheduler()
             c_mlx = scheduler.gpu_smart_matmul(a._mlx, b._mlx, b_tensor=b)
             result = Tensor.__new__(Tensor)
@@ -456,7 +471,7 @@ def matmul(a: Tensor, b: Tensor) -> Tensor:
         result._np = np.matmul(a_np, b_np)
         result._mlx = None
         result._on_gpu = False
-    elif HAS_TRI and min_dim >= 1024:
+    elif HAS_TRI and min_dim >= 1024 and (M * K * N >= 15_000_000_000):
         # Large matrices: Tri-compute (GPU+CPU+ANE parallel)
         a_np = a.numpy if a._on_gpu else a._np
         b_np = b.numpy if b._on_gpu else b._np
@@ -573,7 +588,7 @@ def gelu(x: Tensor) -> Tensor:
         result = Tensor.__new__(Tensor)
         x_mlx = x._mlx
         result._mlx = 0.5 * x_mlx * (1 + mx.tanh(
-            mx.sqrt(mx.array(2.0 / np.pi)) * (x_mlx + 0.044715 * x_mlx ** 3)
+            0.7978845608028654 * (x_mlx + 0.044715 * x_mlx ** 3)
         ))
         result._np = None
         result._on_gpu = True

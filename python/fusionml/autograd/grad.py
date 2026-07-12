@@ -134,6 +134,8 @@ def _ensure_np(tensor_or_data):
 def _reduce_grad(grad, target_shape):
     """Reduce gradient to match target shape (handle broadcasting).
     Works with both mlx and numpy arrays."""
+    if grad.shape == target_shape:
+        return grad
     if isinstance(grad, np.ndarray):
         while grad.ndim > len(target_shape):
             grad = grad.sum(axis=0)

@@ -109,8 +109,17 @@ extension Fusion.nn {
             return GradTensor(result, requiresGrad: input.requiresGrad)
         }
         
-        /// Apply Softmax
+        /// Apply Softmax — routes to GPU when input has pending GPU writes or is large
         public static func softmax(_ input: GradTensor, dim: Int = -1) throws -> GradTensor {
+            // GPU path: use Metal softmax_row kernel for 2D tensors when data is on GPU
+            // or tensor is large enough to benefit. This avoids the costly toArray() sync.
+            if input.data.ndim == 2 && IntelligentRouter.shared.forcedBackend != .cpu &&
+               (input.data.isDirty || input.count >= 100000) {
+                let result = try GPUEngine.shared.softmax(input.data)
+                return GradTensor(result, requiresGrad: input.requiresGrad)
+            }
+            
+            // CPU fallback for small tensors or non-2D shapes
             let data = input.data.toArray()
             let lastDim = input.shape.last!
             let numGroups = input.count / lastDim

@@ -96,23 +96,43 @@ public final class CrossEntropyLoss: Loss {
         let batch = predictions.shape[0]
         let classes = predictions.shape[1]
         
-        // Softmax
-        let logits = predictions.data.toArray()
-        var probs = [Float](repeating: 0, count: logits.count)
+        if IntelligentRouter.shared.forcedBackend != .cpu {
+            let (totalLoss, _, probs) = try GPUEngine.shared.crossEntropyForward(predictions: predictions.data, targets: targets)
+            
+            let output = GradTensor(totalLoss, requiresGrad: predictions.requiresGrad)
+            output.isLeaf = false
+            
+            if output.requiresGrad {
+                let targetsCopy = targets
+                output.gradNode = GradNode(
+                    inputs: [predictions],
+                    gradFn: { _, gradOutput in
+                        let grad = try! GPUEngine.shared.crossEntropyBackward(probs: probs, targets: targetsCopy, upstream: gradOutput)
+                        return [grad]
+                    },
+                    name: "cross_entropy"
+                )
+            }
+            return output
+        }
         
-        for b in 0..<batch {
+        // Softmax via direct pointer access
+        let logitsPtr = predictions.data.buffer.pointer.bindMemory(to: Float.self, capacity: predictions.count)
+        var probs = [Float](repeating: 0, count: predictions.count)
+        
+        DispatchQueue.concurrentPerform(iterations: batch) { b in
             let offset = b * classes
             
             // Find max for numerical stability
             var maxVal: Float = -Float.infinity
             for c in 0..<classes {
-                maxVal = max(maxVal, logits[offset + c])
+                maxVal = max(maxVal, logitsPtr[offset + c])
             }
             
             // Compute exp and sum
             var sumExp: Float = 0
             for c in 0..<classes {
-                probs[offset + c] = exp(logits[offset + c] - maxVal)
+                probs[offset + c] = exp(logitsPtr[offset + c] - maxVal)
                 sumExp += probs[offset + c]
             }
             
@@ -122,12 +142,12 @@ public final class CrossEntropyLoss: Loss {
             }
         }
         
-        // Compute loss: -log(p[target])
-        let targetData = targets.toArray()
+        // Compute loss: -log(p[target]) via direct pointer access
+        let targetPtr = targets.buffer.pointer.bindMemory(to: Float.self, capacity: targets.count)
         var loss: Float = 0
         
         for b in 0..<batch {
-            let targetClass = Int(targetData[b])
+            let targetClass = Int(targetPtr[b])
             let prob = probs[b * classes + targetClass]
             loss -= log(max(prob, 1e-7))
         }
@@ -148,18 +168,19 @@ public final class CrossEntropyLoss: Loss {
             output.gradNode = GradNode(
                 inputs: [predictions],
                 gradFn: { _, gradOutput in
-                    let targArr = targetsCopy.toArray()
-                    let upstream = gradOutput.toArray()[0]
+                    let targPtr = targetsCopy.buffer.pointer.bindMemory(to: Float.self, capacity: targetsCopy.count)
+                    let upstream = gradOutput.buffer.pointer.bindMemory(to: Float.self, capacity: 1).pointee
                     
                     var grad = try! Tensor(shape: [batchSize, numClasses], dtype: .float32)
                     let gradPtr = grad.buffer.pointer.bindMemory(to: Float.self, capacity: grad.count)
                     
-                    for b in 0..<batchSize {
-                        let targetClass = Int(targArr[b])
+                    DispatchQueue.concurrentPerform(iterations: batchSize) { b in
+                        let targetClass = Int(targPtr[b])
+                        let offset = b * numClasses
                         for c in 0..<numClasses {
-                            let p = probsCopy[b * numClasses + c]
+                            let p = probsCopy[offset + c]
                             let indicator: Float = (c == targetClass) ? 1.0 : 0.0
-                            gradPtr[b * numClasses + c] = upstream * (p - indicator) / Float(batchSize)
+                            gradPtr[offset + c] = upstream * (p - indicator) / Float(batchSize)
                         }
                     }
                     

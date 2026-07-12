@@ -62,4 +62,35 @@ final class FusionMLTests: XCTestCase {
         
         XCTAssertNotNil(x.grad)
     }
+    
+    func testSplit() throws {
+        let x = GradTensor(try Tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], shape: [2, 3]), requiresGrad: true)
+        let splits = try GradTensor.split(x, parts: 3)
+        
+        XCTAssertEqual(splits.count, 3)
+        XCTAssertEqual(splits[0].shape, [2, 1])
+        XCTAssertEqual(splits[1].shape, [2, 1])
+        XCTAssertEqual(splits[2].shape, [2, 1])
+        
+        XCTAssertEqual(splits[0].data.toArray(), [1.0, 4.0])
+        XCTAssertEqual(splits[1].data.toArray(), [2.0, 5.0])
+        XCTAssertEqual(splits[2].data.toArray(), [3.0, 6.0])
+        
+        // Backward test: sum(splits[0]) * 2 + sum(splits[1]) * 5 + sum(splits[2]) * 10
+        let s0 = try splits[0].sum()
+        let s1 = try splits[1].sum()
+        let s2 = try splits[2].sum()
+        
+        let loss1 = try GradTensor.mul(s0, GradTensor(try Tensor([2.0])))
+        let loss2 = try GradTensor.mul(s1, GradTensor(try Tensor([5.0])))
+        let loss3 = try GradTensor.mul(s2, GradTensor(try Tensor([10.0])))
+        
+        let loss = try GradTensor.add(try GradTensor.add(loss1, loss2), loss3)
+        try Fusion.autograd.backward(loss)
+        
+        XCTAssertNotNil(x.grad)
+        let grad = x.grad!.toArray()
+        // Expected gradient: row 1 [2, 5, 10], row 2 [2, 5, 10]
+        XCTAssertEqual(grad, [2.0, 5.0, 10.0, 2.0, 5.0, 10.0])
+    }
 }

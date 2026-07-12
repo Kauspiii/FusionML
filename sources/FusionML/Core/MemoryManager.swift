@@ -86,6 +86,14 @@ public final class UnifiedBuffer: @unchecked Sendable {
         self.device = device
     }
     
+    /// Create buffer wrapping an existing MTLBuffer
+    public init(device: MTLDevice, buffer: MTLBuffer, size: Int) {
+        self.id = UUID()
+        self.size = size
+        self.buffer = buffer
+        self.device = device
+    }
+    
     /// Read data as typed array
     public func read<T>(as type: T.Type, count: Int) -> [T] {
         let ptr = pointer.bindMemory(to: T.self, capacity: count)

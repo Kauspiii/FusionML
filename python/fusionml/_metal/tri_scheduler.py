@@ -21,6 +21,10 @@ import time
 import json
 import os
 
+# Limit Accelerate BLAS threads to prevent performance core starvation of the Metal command driver
+os.environ["VECLIB_MAXIMUM_THREADS"] = "2"
+
+
 # Backend availability
 try:
     import mlx.core as mx
@@ -189,171 +193,217 @@ class TriComputeScheduler:
         if hasattr(self, '_pool'):
             self._pool.shutdown(wait=False)
 
-    def calibrate(self, sizes: List[int] = None, iterations: int = 5, verbose: bool = True):
+    def calibrate(self, shapes: Optional[List] = None, iterations: int = 5, verbose: bool = True, sizes: Optional[List] = None):
         """
         Contention-aware calibration via empirical grid search.
-        
-        On unified-memory SoCs, backends share memory bandwidth.
-        Profiling them independently OVERESTIMATES parallel performance.
-        Instead, we grid-search actual parallel execution times across
-        split ratios to find the empirically optimal ratio.
-        
-        This is the core FusionML innovation: contention-aware scheduling.
+        shapes: list of either int or (M, K, N) tuple
         """
-        if sizes is None:
-            sizes = [256, 512, 1024, 2048, 4096]
+        if shapes is None:
+            shapes = sizes
+        if shapes is None:
+            shapes = [256, 512, 1024, 2048, 4096]
         
         if verbose:
             print("⚡ Tri-Compute Calibration (contention-aware grid search)")
             print("=" * 60)
         
-        for size in sizes:
+        for shape in shapes:
+            if isinstance(shape, int):
+                M = K = N = shape
+                key = f"matmul_{shape}"
+            else:
+                M, K, N = shape
+                key = f"matmul_{M}_{K}_{N}"
+                
             if verbose:
-                print(f"\n  Profiling matmul {size}x{size}...")
-            
-            # Phase 1: Profile each backend independently (for baseline)
-            profile = self.profiler.profile_matmul(size, iterations=iterations)
-            best_single = min(profile, key=profile.get)
-            best_single_time = profile[best_single]
-            
-            if verbose:
-                parts = [f"{k}={v:.3f}ms" for k, v in profile.items()]
-                print(f"    Solo: {', '.join(parts)}")
+                print(f"\n  Profiling matmul shape {M}x{K}x{N}...")
             
             # Phase 2: Grid search parallel split ratios
-            if len(profile) >= 2 and HAS_MLX and self.enable_gpu and self.enable_cpu:
-                best_ratio, best_time = self._grid_search_ratio(
-                    size, iterations=max(3, iterations), verbose=verbose
+            if HAS_MLX and self.enable_gpu and self.enable_cpu:
+                best_ratio, best_time, gpu_only_time = self._grid_search_ratio(
+                    M, K, N, iterations=max(3, iterations), verbose=verbose
                 )
                 
-                if best_time < best_single_time * 0.98:  # 2% margin
-                    key = f"matmul_{size}"
+                time_saved = gpu_only_time - best_time
+                # Only split if parallel co-execution is faster than compiled GPU-only:
+                # - saved at least 1.0 ms OR is at least 3% faster (to reject noise)
+                if best_ratio < 1.0 and (time_saved >= 1.0 or best_time < gpu_only_time * 0.97):
                     self.calibrated_ratios[key] = {"gpu": best_ratio, "cpu": 1.0 - best_ratio}
                     if verbose:
-                        print(f"    ✅ Parallel wins: {best_time:.3f}ms (GPU={best_ratio:.0%}/CPU={1-best_ratio:.0%}) vs {best_single}={best_single_time:.3f}ms")
+                        print(f"    ✅ Parallel wins: {best_time:.3f}ms (GPU={best_ratio:.0%}/CPU={1-best_ratio:.0%}) vs GPU-Only={gpu_only_time:.3f}ms (saved {time_saved:.3f}ms)")
                 else:
-                    key = f"matmul_{size}"
-                    self.calibrated_ratios[key] = {best_single: 1.0}
+                    self.calibrated_ratios[key] = {"gpu": 1.0}
                     if verbose:
-                        print(f"    ⚡ Single wins: {best_single}={best_single_time:.3f}ms vs best parallel={best_time:.3f}ms")
+                        print(f"    ⚡ Single wins: GPU-Only={gpu_only_time:.3f}ms vs best parallel={best_time:.3f}ms (saved {time_saved:.3f}ms)")
             else:
-                key = f"matmul_{size}"
-                self.calibrated_ratios[key] = {best_single: 1.0}
-                if verbose:
-                    print(f"    → {best_single} only: {best_single_time:.3f}ms")
+                self.calibrated_ratios[key] = {"gpu": 1.0}
         
         self._calibration_count += 1
         
         if verbose:
-            print(f"\n{'=' * 60}")
-            print(f"✓ Calibration complete ({len(sizes)} sizes)")
+            print(f"✓ Calibration complete ({len(shapes)} shapes)")
     
-    def _grid_search_ratio(self, size: int, iterations: int = 5,
-                           verbose: bool = False) -> Tuple[float, float]:
+    def _grid_search_ratio(self, M: int, K: int, N: int, iterations: int = 5,
+                           verbose: bool = False) -> Tuple[float, float, float]:
         """
-        Grid search GPU/CPU split ratios under actual parallel execution.
-        Returns (best_gpu_ratio, best_time_ms).
+        Contention-free, fair interleaved grid search of GPU/CPU split ratios.
+        Alternates runs in randomized order to completely eliminate thermal/frequency scaling bias.
         """
-        a = np.random.randn(size, size).astype(np.float32)
-        b = np.random.randn(size, size).astype(np.float32)
-        b_mx = mx.array(b)
+        import random
+        a_mx = mx.random.normal((M, K))
+        b_mx = mx.random.normal((K, N))
+        mx.eval(a_mx, b_mx)
+        
+        run_fns = {}
+        gpu_pcts = [70, 75, 80, 85, 90, 95, 100]
+        
+        # Build and compile run functions for each ratio
+        for gpu_pct in gpu_pcts:
+            if gpu_pct == 100:
+                @mx.compile
+                def compiled_fn(a, b):
+                    return a @ b
+                def make_runner(fn):
+                    return lambda: mx.eval(fn(a_mx, b_mx))
+                run_fns[gpu_pct] = make_runner(compiled_fn)
+            else:
+                gpu_rows = int(M * gpu_pct / 100)
+                cpu_rows = M - gpu_rows
+                if cpu_rows < 1 or gpu_rows < 1:
+                    continue
+                a_cpu = a_mx[:cpu_rows]
+                a_gpu = a_mx[cpu_rows:]
+                @mx.compile
+                def compiled_fn(a_gpu, a_cpu, b):
+                    c_gpu = a_gpu @ b
+                    mx.set_default_device(mx.cpu)
+                    c_cpu = a_cpu @ b
+                    mx.set_default_device(mx.gpu)
+                    return mx.concatenate([c_cpu, c_gpu], axis=0)
+                def make_runner(fn, a_gpu=a_gpu, a_cpu=a_cpu):
+                    return lambda: mx.eval(fn(a_gpu, a_cpu, b_mx))
+                run_fns[gpu_pct] = make_runner(compiled_fn)
+                
+        # Warmup all
+        for _ in range(15):
+            for r in run_fns.values():
+                r()
+                
+        # Interleaved measurement
+        results = {pct: [] for pct in run_fns.keys()}
+        runs = max(10, iterations * 4) # Run enough iterations to get clean medians
+        
+        for _ in range(runs):
+            p_order = list(run_fns.keys())
+            random.shuffle(p_order)
+            for pct in p_order:
+                t0 = time.perf_counter()
+                run_fns[pct]()
+                results[pct].append((time.perf_counter() - t0) * 1000)
+                
+        # Calculate medians
+        medians = {pct: float(np.median(results[pct])) for pct in run_fns.keys()}
         
         best_ratio = 1.0
-        best_time = float('inf')
+        best_time = medians.get(100, float('inf'))
+        gpu_only_time = best_time
         
-        # Search from 85% to 98% GPU (CPU gets 2-15%)
-        import threading
-        for gpu_pct in [88, 90, 92, 94, 96]:
-            gpu_rows = int(size * gpu_pct / 100)
-            cpu_rows = size - gpu_rows
-            if cpu_rows < 1 or gpu_rows < 1:
-                continue
-            
-            a_gpu_mx = mx.array(np.ascontiguousarray(a[:gpu_rows]))
-            a_cpu = np.ascontiguousarray(a[gpu_rows:])
-            result_cpu = np.empty((cpu_rows, size), dtype=np.float32)
-            
-            def gpu_fn():
-                c = a_gpu_mx @ b_mx; mx.eval(c)
-            def cpu_fn():
-                np.matmul(a_cpu, b, out=result_cpu)
-            
-            # Warmup
-            t1 = threading.Thread(target=gpu_fn)
-            t2 = threading.Thread(target=cpu_fn)
-            t1.start(); t2.start(); t1.join(); t2.join()
-            
-            times = []
-            for _ in range(iterations):
-                t0 = time.perf_counter()
-                t1 = threading.Thread(target=gpu_fn)
-                t2 = threading.Thread(target=cpu_fn)
-                t1.start(); t2.start(); t1.join(); t2.join()
-                times.append((time.perf_counter() - t0) * 1000)
-            
-            med = float(np.median(times))
+        for pct, med in medians.items():
+            if verbose:
+                print(f"      Ratio GPU={pct}%: {med:.3f}ms")
             if med < best_time:
                 best_time = med
-                best_ratio = gpu_pct / 100.0
-        
-        return best_ratio, best_time
+                best_ratio = pct / 100.0
+                
+        return best_ratio, best_time, gpu_only_time
     
-    def get_ratios(self, size: int) -> Dict[str, float]:
+    def get_ratios(self, M: int, K: Optional[int] = None, N: Optional[int] = None) -> Dict[str, float]:
         """
-        Get the optimal ratios for a given matrix size.
-        Interpolates between calibrated sizes.
+        Get the optimal ratios for a given matrix shape.
         """
-        key = f"matmul_{size}"
+        if K is None:
+            K = M
+        if N is None:
+            N = M
+        key = f"matmul_{M}_{K}_{N}"
         
         # Exact match
         if key in self.calibrated_ratios:
             return self.calibrated_ratios[key]
         
-        # Find nearest calibrated size
-        calibrated_sizes = []
+        # Fallback to nearest calibrated square size
+        min_dim = min(M, K, N)
+        square_key = f"matmul_{min_dim}"
+        if square_key in self.calibrated_ratios:
+            return self.calibrated_ratios[square_key]
+            
+        # Find closest calibrated shape (1D or 3D) by absolute dimension distance
+        best_key = None
+        best_dist = float('inf')
         for k in self.calibrated_ratios:
             if k.startswith("matmul_"):
-                try:
-                    calibrated_sizes.append(int(k.split("_")[1]))
-                except ValueError:
-                    pass
+                parts = k.split("_")
+                if len(parts) == 4:
+                    try:
+                        c_M, c_K, c_N = int(parts[1]), int(parts[2]), int(parts[3])
+                        dist = abs(c_M - M) + abs(c_K - K) + abs(c_N - N)
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_key = k
+                    except ValueError:
+                        pass
+                elif len(parts) == 2:
+                    try:
+                        c_size = int(parts[1])
+                        dist = abs(c_size - M) + abs(c_size - K) + abs(c_size - N)
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_key = k
+                    except ValueError:
+                        pass
+                        
+        if best_key is not None:
+            return self.calibrated_ratios[best_key]
         
-        if not calibrated_sizes:
-            # Not calibrated — use defaults
-            if size < self.CPU_ONLY_THRESHOLD:
-                return {"cpu": 1.0}
-            elif size < self.DUAL_THRESHOLD:
-                return {"gpu": 0.7, "cpu": 0.3}
-            else:
-                return {"gpu": 0.6, "cpu": 0.25, "ane": 0.15}
-        
-        # Use closest calibrated size
-        closest = min(calibrated_sizes, key=lambda s: abs(s - size))
-        return self.calibrated_ratios[f"matmul_{closest}"]
+        # Default fallback if no calibration is loaded
+        if min_dim < self.CPU_ONLY_THRESHOLD:
+            return {"cpu": 1.0}
+        elif min_dim < self.DUAL_THRESHOLD:
+            return {"gpu": 0.7, "cpu": 0.3}
+        else:
+            return {"gpu": 0.6, "cpu": 0.25, "ane": 0.15}
     
-    def _get_cached_np(self, mlx_arr, tensor_obj=None) -> np.ndarray:
+    def _get_cached_np(self, mlx_arr, tensor_obj=None, transposed=False) -> np.ndarray:
         """Get CPU NumPy array of an MLX array using a cache keyed by array object ID."""
         is_param = getattr(tensor_obj, 'is_parameter', False)
         if is_param:
-            key = id(mlx_arr)
+            key = (id(tensor_obj), transposed)
             if key in self._cpu_cache:
                 return self._cpu_cache[key]
         
         mx.eval(mlx_arr)
-        arr_np = np.array(mlx_arr)
+        arr_np = np.array(mlx_arr, copy=False)
         
         if is_param:
             if len(self._cpu_cache) > 200:
                 self._cpu_cache.clear()
             self._cpu_cache[key] = arr_np
         return arr_np
-
+ 
     def gpu_smart_matmul(self, a_mlx, b_mlx, b_tensor=None) -> 'mx.array':
         """
-        GPU-native smart split matmul.
-        Splits rows of A between GPU and CPU without copying the GPU part to CPU.
-        Uses cached CPU weights to avoid copying the weight matrix B.
+        GPU-native smart split matmul using MLX GPU and MLX CPU.
+        Splits rows of A between GPU and CPU asynchronously without NumPy copies.
         """
+        if len(a_mlx.shape) > 2 and len(b_mlx.shape) == 2:
+            orig_shape = a_mlx.shape
+            a_2d = a_mlx.reshape(-1, orig_shape[-1])
+            res_2d = self.gpu_smart_matmul(a_2d, b_mlx, b_tensor=b_tensor)
+            out_shape = list(orig_shape[:-1]) + [b_mlx.shape[-1]]
+            return res_2d.reshape(out_shape)
+        if len(a_mlx.shape) != 2 or len(b_mlx.shape) != 2:
+            return a_mlx @ b_mlx
+
         M, K = a_mlx.shape
         K2, N = b_mlx.shape
         min_dim = min(M, K, N)
@@ -362,56 +412,40 @@ class TriComputeScheduler:
         if min_dim < self.CPU_ONLY_THRESHOLD:
             return a_mlx @ b_mlx
             
-        # Get ratios
-        ratios = self.get_ratios(min_dim)
+        # Get ratios based on 3D shape
+        ratios = self.get_ratios(M, K, N)
         if ratios:
             gpu_ratio = ratios.get("gpu", 0.0)
             cpu_ratio = ratios.get("cpu", 0.0)
         else:
             gpu_ratio, cpu_ratio = 0.70, 0.30
-        # print(f"DEBUG PATH: min_dim={min_dim}, cpu_ratio={cpu_ratio}, gpu_ratio={gpu_ratio}")
-        
-        if cpu_ratio < 0.05:
+            
+        if cpu_ratio < 0.02:
             return a_mlx @ b_mlx
-        if gpu_ratio < 0.05:
-            # CPU only
-            a_np = np.array(a_mlx)
-            b_np = self._get_cached_np(b_mlx, b_tensor)
-            return mx.array(np.matmul(a_np, b_np))
+        if gpu_ratio < 0.02:
+            # CPU only via MLX CPU
+            mx.set_default_device(mx.cpu)
+            res = a_mlx @ b_mlx
+            mx.set_default_device(mx.gpu)
+            return res
             
         cpu_rows = int(M * cpu_ratio)
-        gpu_rows = M - cpu_rows
+        a_cpu = a_mlx[:cpu_rows]
+        a_gpu = a_mlx[cpu_rows:]
         
-        # Slice A
-        a_cpu_mlx = a_mlx[:cpu_rows]
-        a_gpu_mlx = a_mlx[cpu_rows:]
+        # 1. Queue GPU matmul
+        c_gpu = a_gpu @ b_mlx
         
-        # Copy A's CPU portion (only the sliced rows)
-        a_cpu_np = np.array(a_cpu_mlx)
+        # 2. Queue CPU matmul
+        mx.set_default_device(mx.cpu)
+        c_cpu = a_cpu @ b_mlx
+        mx.set_default_device(mx.gpu)
         
-        # Get B on CPU (cached)
-        b_np = self._get_cached_np(b_mlx, b_tensor)
+        # 3. Evaluate both asynchronously in parallel (non-blocking)
+        mx.eval(c_gpu, c_cpu)
         
-        import threading
-        cpu_res = None
-        def cpu_work():
-            nonlocal cpu_res
-            cpu_res = np.matmul(a_cpu_np, b_np)
-            
-        # Run CPU matmul in background thread
-        t = threading.Thread(target=cpu_work)
-        t.start()
-        
-        # Run GPU matmul on caller thread
-        c_gpu_mlx = a_gpu_mlx @ b_mlx
-        mx.eval(c_gpu_mlx)
-        
-        # Wait for CPU
-        t.join()
-        
-        # Upload CPU result to GPU and concatenate
-        c_cpu_mlx = mx.array(cpu_res)
-        return mx.concatenate([c_cpu_mlx, c_gpu_mlx], axis=0)
+        # 4. Concatenate results (resolved in unified memory)
+        return mx.concatenate([c_cpu, c_gpu], axis=0)
 
     def tri_matmul(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
         """
@@ -421,10 +455,19 @@ class TriComputeScheduler:
         All compute concurrently, results are combined.
         
         Optimized for zero overhead:
-          - Persistent thread pool (no thread creation cost)
-          - View-based slicing (no data copies)
-          - Pre-allocated output buffer
+        - Persistent thread pool (no thread creation cost)
+        - View-based slicing (no data copies)
+        - Pre-allocated output buffer
         """
+        if len(a.shape) > 2 and len(b.shape) == 2:
+            orig_shape = a.shape
+            a_2d = a.reshape(-1, orig_shape[-1])
+            res_2d = self.tri_matmul(a_2d, b)
+            out_shape = list(orig_shape[:-1]) + [b.shape[-1]]
+            return res_2d.reshape(out_shape)
+        if len(a.shape) != 2 or len(b.shape) != 2:
+            return np.matmul(a, b)
+
         M, K = a.shape
         K2, N = b.shape
         

@@ -61,8 +61,7 @@ public final class Llama3Block: Module {
         let k = try kProj.forward(norm1)
         let v = try vProj.forward(norm1)
         
-        let kT = try GradTensor(Tensor.transpose(k.data), requiresGrad: k.requiresGrad)
-        let scores = try GradTensor.matmul(q, kT)
+        let scores = try GradTensor.matmul(q, k, transposeRight: true)
         let attended = try GradTensor.matmul(scores, v)
         let projected = try oProj.forward(attended)
         
@@ -135,8 +134,7 @@ public final class GPT2Block: Module {
         let k = try kProj.forward(norm1)
         let v = try vProj.forward(norm1)
         
-        let kT = try GradTensor(Tensor.transpose(k.data), requiresGrad: k.requiresGrad)
-        let scores = try GradTensor.matmul(q, kT)
+        let scores = try GradTensor.matmul(q, k, transposeRight: true)
         let attended = try GradTensor.matmul(scores, v)
         let projected = try oProj.forward(attended)
         
@@ -214,6 +212,8 @@ struct BenchmarkExample {
             (M: 1024, N: 1600, K: 2048),
             (M: 1024, N: 6400, K: 1600),
             (M: 1024, N: 1600, K: 6400),
+            (M: 1024, N: 1024, K: 1600),
+            (M: 1024, N: 1600, K: 1024),
             
             (M: 1024, N: 10, K: 4096),
             
@@ -229,43 +229,95 @@ struct BenchmarkExample {
         try SmartScheduler3.shared.calibrate(sizes: [512, 1024, 2048])
         MemoryManager.shared.clearPool()
         
-        let runEval = { (model: Module, x: GradTensor) throws -> Double in
-            let start = CFAbsoluteTimeGetCurrent()
-            for _ in 0..<3 {
-                try autoreleasepool {
-                    _ = try model.forward(x)
-                }
-            }
-            return (CFAbsoluteTimeGetCurrent() - start) / 3 * 1000
+        struct RunStats {
+            let mean: Double
+            let std: Double
+            let median: Double
+            let minVal: Double
+            let maxVal: Double
         }
         
-        let runTrainStep = { (model: Module, optimizer: Optimizer, x: GradTensor, y: Tensor) throws -> Double in
-            let start = CFAbsoluteTimeGetCurrent()
-            for _ in 0..<3 {
+        let calculateStats = { (times: [Double]) -> RunStats in
+            let sorted = times.sorted()
+            let count = sorted.count
+            let median = count % 2 == 0 ? (sorted[count/2 - 1] + sorted[count/2]) / 2.0 : sorted[count/2]
+            let mean = times.reduce(0, +) / Double(count)
+            let variance = times.map { Foundation.pow($0 - mean, 2) }.reduce(0, +) / Double(count)
+            let std = sqrt(variance)
+            return RunStats(mean: mean, std: std, median: median, minVal: sorted.first ?? 0, maxVal: sorted.last ?? 0)
+        }
+        
+        let runEval = { (model: Module, x: GradTensor) throws -> RunStats in
+            // Warmup
+            for _ in 0..<20 {
+                try autoreleasepool {
+                    GPUEngine.shared.startBatch()
+                    _ = try model.forward(x)
+                    GPUEngine.shared.sync()
+                }
+            }
+            MemoryManager.shared.clearPool()
+
+            var times: [Double] = []
+            let iterations = 50
+            for _ in 0..<iterations {
+                try autoreleasepool {
+                    let start = CFAbsoluteTimeGetCurrent()
+                    GPUEngine.shared.startBatch()
+                    _ = try model.forward(x)
+                    GPUEngine.shared.sync()
+                    times.append((CFAbsoluteTimeGetCurrent() - start) * 1000)
+                }
+            }
+            return calculateStats(times)
+        }
+        
+        let runTrainStep = { (model: Module, optimizer: Optimizer, x: GradTensor, y: Tensor) throws -> RunStats in
+            // Warmup
+            for _ in 0..<10 {
                 try autoreleasepool {
                     optimizer.zeroGrad()
+                    GPUEngine.shared.startBatch()
                     let output = try model.forward(x)
                     let loss = try Fusion.nn.functional.crossEntropy(output, y)
                     try Fusion.autograd.backward(loss)
                     try optimizer.step()
+                    GPUEngine.shared.sync()
                 }
             }
-            return (CFAbsoluteTimeGetCurrent() - start) / 3 * 1000
+            MemoryManager.shared.clearPool()
+
+            var times: [Double] = []
+            let iterations = 30
+            for _ in 0..<iterations {
+                try autoreleasepool {
+                    optimizer.zeroGrad()
+                    let start = CFAbsoluteTimeGetCurrent()
+                    GPUEngine.shared.startBatch()
+                    let output = try model.forward(x)
+                    let loss = try Fusion.nn.functional.crossEntropy(output, y)
+                    try Fusion.autograd.backward(loss)
+                    try optimizer.step()
+                    GPUEngine.shared.sync()
+                    times.append((CFAbsoluteTimeGetCurrent() - start) * 1000)
+                }
+            }
+            return calculateStats(times)
         }
         
-        let printTable = { (title: String, cpu: Double, gpu: Double, smart: Double) in
-            let bestSingle = min(cpu, gpu)
-            let speedup = ((bestSingle - smart) / bestSingle) * 100
-            let ratio = bestSingle / smart
+        let printTable = { (title: String, cpu: RunStats, gpu: RunStats, smart: RunStats) in
+            let bestSingle = min(cpu.median, gpu.median)
+            let speedup = ((bestSingle - smart.median) / bestSingle) * 100
+            let ratio = bestSingle / smart.median
             
             print("\n📊 \(title):")
-            print("   CPU-Only:    \(String(format: "%6.2f", cpu)) ms")
-            print("   GPU-Only:    \(String(format: "%6.2f", gpu)) ms")
-            print("   Smart Split:  \(String(format: "%6.2f", smart)) ms ⚡")
+            print("   CPU-Only:    \(String(format: "%6.2f", cpu.median)) ± \(String(format: "%.2f", cpu.std)) ms")
+            print("   GPU-Only:    \(String(format: "%6.2f", gpu.median)) ± \(String(format: "%.2f", gpu.std)) ms")
+            print("   Smart Split:  \(String(format: "%6.2f", smart.median)) ± \(String(format: "%.2f", smart.std)) ms ⚡")
             if speedup > 0 {
                 print("   Winner:       Smart Split (\(String(format: "%.1f", speedup))% latency reduction / \(String(format: "%.2f", ratio))x speedup)")
             } else {
-                let winner = cpu < gpu ? "CPU" : "GPU"
+                let winner = cpu.median < gpu.median ? "CPU" : "GPU"
                 print("   Winner:       \(winner) (overhead bounds splitting)")
             }
         }
@@ -312,16 +364,16 @@ struct BenchmarkExample {
             printTable("Llama-3-8B Training Step", llamaTrainCpu, llamaTrainGpu, llamaTrainSmart)
             
             results["llama_inference"] = [
-                "cpu_ms": llamaEvalCpu,
-                "gpu_ms": llamaEvalGpu,
-                "smart_ms": llamaEvalSmart,
-                "speedup": min(llamaEvalCpu, llamaEvalGpu) / llamaEvalSmart
+                "cpu_ms": llamaEvalCpu.median,
+                "gpu_ms": llamaEvalGpu.median,
+                "smart_ms": llamaEvalSmart.median,
+                "speedup": min(llamaEvalCpu.median, llamaEvalGpu.median) / llamaEvalSmart.median
             ]
             results["llama_training"] = [
-                "cpu_ms": llamaTrainCpu,
-                "gpu_ms": llamaTrainGpu,
-                "smart_ms": llamaTrainSmart,
-                "speedup": min(llamaTrainCpu, llamaTrainGpu) / llamaTrainSmart
+                "cpu_ms": llamaTrainCpu.median,
+                "gpu_ms": llamaTrainGpu.median,
+                "smart_ms": llamaTrainSmart.median,
+                "speedup": min(llamaTrainCpu.median, llamaTrainGpu.median) / llamaTrainSmart.median
             ]
         }
         
@@ -367,16 +419,16 @@ struct BenchmarkExample {
             printTable("GPT-2 XL Training Step", gpt2TrainCpu, gpt2TrainGpu, gpt2TrainSmart)
             
             results["gpt2_inference"] = [
-                "cpu_ms": gpt2EvalCpu,
-                "gpu_ms": gpt2EvalGpu,
-                "smart_ms": gpt2EvalSmart,
-                "speedup": min(gpt2EvalCpu, gpt2EvalGpu) / gpt2EvalSmart
+                "cpu_ms": gpt2EvalCpu.median,
+                "gpu_ms": gpt2EvalGpu.median,
+                "smart_ms": gpt2EvalSmart.median,
+                "speedup": min(gpt2EvalCpu.median, gpt2EvalGpu.median) / gpt2EvalSmart.median
             ]
             results["gpt2_training"] = [
-                "cpu_ms": gpt2TrainCpu,
-                "gpu_ms": gpt2TrainGpu,
-                "smart_ms": gpt2TrainSmart,
-                "speedup": min(gpt2TrainCpu, gpt2TrainGpu) / gpt2TrainSmart
+                "cpu_ms": gpt2TrainCpu.median,
+                "gpu_ms": gpt2TrainGpu.median,
+                "smart_ms": gpt2TrainSmart.median,
+                "speedup": min(gpt2TrainCpu.median, gpt2TrainGpu.median) / gpt2TrainSmart.median
             ]
         }
         
@@ -426,16 +478,16 @@ struct BenchmarkExample {
             printTable("MLP Training Step", mlpTrainCpu, mlpTrainGpu, mlpTrainSmart)
             
             results["mlp_inference"] = [
-                "cpu_ms": mlpEvalCpu,
-                "gpu_ms": mlpEvalGpu,
-                "smart_ms": mlpEvalSmart,
-                "speedup": min(mlpEvalCpu, mlpEvalGpu) / mlpEvalSmart
+                "cpu_ms": mlpEvalCpu.median,
+                "gpu_ms": mlpEvalGpu.median,
+                "smart_ms": mlpEvalSmart.median,
+                "speedup": min(mlpEvalCpu.median, mlpEvalGpu.median) / mlpEvalSmart.median
             ]
             results["mlp_training"] = [
-                "cpu_ms": mlpTrainCpu,
-                "gpu_ms": mlpTrainGpu,
-                "smart_ms": mlpTrainSmart,
-                "speedup": min(mlpTrainCpu, mlpTrainGpu) / mlpTrainSmart
+                "cpu_ms": mlpTrainCpu.median,
+                "gpu_ms": mlpTrainGpu.median,
+                "smart_ms": mlpTrainSmart.median,
+                "speedup": min(mlpTrainCpu.median, mlpTrainGpu.median) / mlpTrainSmart.median
             ]
         }
         
@@ -473,6 +525,7 @@ struct BenchmarkExample {
             // Measure GPU
             let startGpu = CFAbsoluteTimeGetCurrent()
             for _ in 0..<5 { _ = try GPUEngine.shared.matmulMPS(a, b) }
+            GPUEngine.shared.sync()
             let gpuTime = (CFAbsoluteTimeGetCurrent() - startGpu) * 1000 / 5
             
             // Measure 2-Way Smart Split
@@ -480,6 +533,7 @@ struct BenchmarkExample {
             IntelligentRouter.shared.enableSplitting = true
             let startSmart2 = CFAbsoluteTimeGetCurrent()
             for _ in 0..<5 { _ = try IntelligentRouter.shared.matmul(a, b) }
+            GPUEngine.shared.sync()
             let smart2Time = (CFAbsoluteTimeGetCurrent() - startSmart2) * 1000 / 5
             
             // Measure 3-Way Smart Split
@@ -487,6 +541,7 @@ struct BenchmarkExample {
             IntelligentRouter.shared.enableSplitting = true
             let startSmart3 = CFAbsoluteTimeGetCurrent()
             for _ in 0..<5 { _ = try IntelligentRouter.shared.matmul(a, b) }
+            GPUEngine.shared.sync()
             let smart3Time = (CFAbsoluteTimeGetCurrent() - startSmart3) * 1000 / 5
             
             let bestSingle = min(cpuTime, gpuTime)

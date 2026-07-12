@@ -11,9 +11,9 @@ extension GradTensor {
     // MARK: - Matrix Multiplication
     
     /// Matrix multiply with gradient tracking: C = A @ B
-    public static func matmul(_ a: GradTensor, _ b: GradTensor) throws -> GradTensor {
+    public static func matmul(_ a: GradTensor, _ b: GradTensor, transposeLeft: Bool = false, transposeRight: Bool = false, forceGPU: Bool = false, forceCPU: Bool = false) throws -> GradTensor {
         // Forward pass - use intelligent router
-        let result = try IntelligentRouter.shared.matmul(a.data, b.data)
+        let result = try IntelligentRouter.shared.matmul(a.data, b.data, transposeLeft: transposeLeft, transposeRight: transposeRight, isWeightGrad: false, forceGPU: forceGPU, forceCPU: forceCPU)
         let output = GradTensor(result, requiresGrad: a.requiresGrad || b.requiresGrad)
         output.isLeaf = false
         
@@ -21,24 +21,33 @@ extension GradTensor {
             output.gradNode = GradNode(
                 inputs: [a, b],
                 gradFn: { inputs, gradOutput in
-                    // dL/dA = gradOutput @ B^T
-                    // dL/dB = A^T @ gradOutput
                     let aData = inputs[0]
                     let bData = inputs[1]
                     
                     var gradA: Tensor
                     var gradB: Tensor
-                    
                     do {
-                        // Transpose B for grad_A
-                        let bT = try Tensor.transpose(bData)
-                        gradA = try IntelligentRouter.shared.matmul(gradOutput, bT)
-                        
-                        // Transpose A for grad_B
-                        let aT = try Tensor.transpose(aData)
-                        gradB = try IntelligentRouter.shared.matmul(aT, gradOutput)
+                        if transposeLeft && transposeRight {
+                            let aT = try Tensor.transpose(aData)
+                            let bT = try Tensor.transpose(bData)
+                            gradA = try IntelligentRouter.shared.matmul(bT, gradOutput, transposeRight: true)
+                            let gradOutputT = try Tensor.transpose(gradOutput)
+                            gradB = try IntelligentRouter.shared.matmul(gradOutputT, aT)
+                        } else if transposeLeft {
+                            gradA = try IntelligentRouter.shared.matmul(gradOutput, bData, transposeRight: true)
+                            gradB = try IntelligentRouter.shared.matmul(aData, gradOutput)
+                        } else if transposeRight {
+                            gradA = try IntelligentRouter.shared.matmul(gradOutput, bData)
+                            let gradOutputT = try Tensor.transpose(gradOutput)
+                            gradB = try IntelligentRouter.shared.matmul(gradOutputT, aData)
+                        } else {
+                            gradA = try IntelligentRouter.shared.matmul(gradOutput, bData, transposeRight: true)
+                            let gradOutputT = try Tensor.transpose(gradOutput)
+                            let temp = try IntelligentRouter.shared.matmul(gradOutputT, aData)
+                            gradB = try Tensor.transpose(temp)
+                        }
                     } catch {
-                        gradA = gradOutput  // Fallback
+                        gradA = gradOutput
                         gradB = gradOutput
                     }
                     
@@ -77,7 +86,7 @@ extension GradTensor {
     
     /// Element-wise multiply with gradient tracking
     public static func mul(_ a: GradTensor, _ b: GradTensor) throws -> GradTensor {
-        let result = try Tensor.mul(a.data, b.data)
+        let result = try IntelligentRouter.shared.mul(a.data, b.data)
         let output = GradTensor(result, requiresGrad: a.requiresGrad || b.requiresGrad)
         output.isLeaf = false
         
@@ -88,8 +97,8 @@ extension GradTensor {
                     // dL/dA = gradOutput * B
                     // dL/dB = gradOutput * A
                     do {
-                        let gradA = try Tensor.mul(gradOutput, inputs[1])
-                        let gradB = try Tensor.mul(gradOutput, inputs[0])
+                        let gradA = try IntelligentRouter.shared.mul(gradOutput, inputs[1])
+                        let gradB = try IntelligentRouter.shared.mul(gradOutput, inputs[0])
                         return [gradA, gradB]
                     } catch {
                         return [gradOutput, gradOutput]
@@ -116,15 +125,11 @@ extension GradTensor {
                 gradFn: { inputs, gradOutput in
                     // dL/dx = gradOutput * (x > 0 ? 1 : 0)
                     let input = inputs[0]
-                    var mask = try! Tensor(shape: input.shape, dtype: input.dtype)
-                    let inputData = input.toArray()
-                    let maskPtr = mask.buffer.pointer.bindMemory(to: Float.self, capacity: mask.count)
-                    
-                    for i in 0..<input.count {
-                        maskPtr[i] = inputData[i] > 0 ? 1.0 : 0.0
+                    do {
+                        return [try GPUEngine.shared.reluBackward(input, gradOutput)]
+                    } catch {
+                        return [gradOutput]
                     }
-                    
-                    return [try! Tensor.mul(gradOutput, mask)]
                 },
                 name: "relu"
             )
@@ -145,23 +150,12 @@ extension GradTensor {
             output.gradNode = GradNode(
                 inputs: [self],
                 gradFn: { inputs, gradOutput in
-                    // GELU gradient is complex, using approximation
                     let x = inputs[0]
-                    let xData = x.toArray()
-                    var gradInput = try! Tensor(shape: x.shape, dtype: x.dtype)
-                    let gradPtr = gradInput.buffer.pointer.bindMemory(to: Float.self, capacity: gradInput.count)
-                    let upstreamData = gradOutput.toArray()
-                    
-                    for i in 0..<x.count {
-                        let xi = xData[i]
-                        // Approximate GELU derivative
-                        let cdf = 0.5 * (1 + tanh(0.7978845608 * (xi + 0.044715 * xi * xi * xi)))
-                        let pdf = exp(-0.5 * xi * xi) / sqrt(2 * .pi)
-                        let grad = Float(cdf + xi * pdf)
-                        gradPtr[i] = upstreamData[i] * grad
+                    do {
+                        return [try GPUEngine.shared.geluBackward(x, gradOutput)]
+                    } catch {
+                        return [gradOutput]
                     }
-                    
-                    return [gradInput]
                 },
                 name: "gelu"
             )
@@ -275,5 +269,50 @@ extension GradTensor {
         }
         
         return output
+    }
+    
+    // MARK: - Split
+    
+    /// Split a GradTensor along its second dimension
+    public static func split(_ x: GradTensor, parts: Int) throws -> [GradTensor] {
+        let splitTensors = try x.data.split(parts: parts)
+        let outputs = splitTensors.map { GradTensor($0, requiresGrad: x.requiresGrad) }
+        
+        if x.requiresGrad {
+            for (p, output) in outputs.enumerated() {
+                output.isLeaf = false
+                output.gradNode = GradNode(
+                    inputs: [x],
+                    gradFn: { inputs, gradOutput in
+                        do {
+                            if x.grad == nil {
+                                x.grad = try Tensor.zeros(x.shape, dtype: x.data.dtype)
+                            }
+                            if gradOutput.isDirty {
+                                try GPUEngine.shared.splitBackward2D(y: gradOutput, x: x.grad!, parts: parts, partIdx: p)
+                            } else {
+                                let dstPtr = x.grad!.buffer.pointer.bindMemory(to: Float.self, capacity: x.grad!.count)
+                                let srcPtr = gradOutput.buffer.pointer.bindMemory(to: Float.self, capacity: gradOutput.count)
+                                let M = x.shape[0]
+                                let N = x.shape[1]
+                                let partWidth = N / parts
+                                
+                                for i in 0..<M {
+                                    let dstOffset = i * N + p * partWidth
+                                    let srcOffset = i * partWidth
+                                    memcpy(dstPtr.advanced(by: dstOffset), srcPtr.advanced(by: srcOffset), partWidth * 4)
+                                }
+                            }
+                            return []
+                        } catch {
+                            return []
+                        }
+                    },
+                    name: "split_\(p)"
+                )
+            }
+        }
+        
+        return outputs
     }
 }

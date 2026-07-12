@@ -115,6 +115,8 @@ public final class GradTensor: @unchecked Sendable {
         self.grad = upstream
         
         // Backpropagate through the graph
+        GPUEngine.shared.startBatch()
+        defer { GPUEngine.shared.commitBatch() }
         for tensor in sorted {
             guard let node = tensor.gradNode,
                   let gradFn = node.gradFn,
@@ -130,7 +132,7 @@ public final class GradTensor: @unchecked Sendable {
                         input.grad = inputGrad
                     } else {
                         // Accumulate gradients
-                        input.grad = try Tensor.add(input.grad!, inputGrad)
+                        input.grad = try IntelligentRouter.shared.add(input.grad!, inputGrad)
                     }
                 }
             }

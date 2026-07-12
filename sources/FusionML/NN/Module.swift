@@ -61,32 +61,48 @@ public final class GradLinear: Module {
             wPtr[i] = (wPtr[i] - 0.5) * 2 * scale
         }
         self.weight = GradTensor(w, requiresGrad: true)
+        self.weight.data.isParameter = true
         
         if bias {
             self.bias = GradTensor(try Tensor.zeros([1, outFeatures]), requiresGrad: true)
+            self.bias?.data.isParameter = true
         } else {
             self.bias = nil
         }
     }
     
+    /// Cached broadcasted bias for reuse across forward calls with the same batch size
+    private var cachedBroadcastedBias: GradTensor?
+    private var cachedBatchSize: Int = 0
+    
     public func forward(_ input: GradTensor) throws -> GradTensor {
-        var output = try GradTensor.matmul(input, weight)
+        return try forward(input, forceGPU: false, forceCPU: false)
+    }
+    
+    public func forward(_ input: GradTensor, forceGPU: Bool = false, forceCPU: Bool = false) throws -> GradTensor {
+        var output = try GradTensor.matmul(input, weight, forceGPU: forceGPU, forceCPU: forceCPU)
         if let bias = bias {
-            // Broadcast bias to match batch size
             let batchSize = input.shape[0]
-            let biasData = bias.data.toArray()
-            var broadcastedBias = try Tensor(shape: [batchSize, outFeatures], dtype: bias.data.dtype)
-            let ptr = broadcastedBias.buffer.pointer.bindMemory(to: Float.self, capacity: broadcastedBias.count)
             
-            for b in 0..<batchSize {
-                for f in 0..<outFeatures {
-                    ptr[b * outFeatures + f] = biasData[f]
+            // Rebuild cached bias only when batch size changes
+            if cachedBatchSize != batchSize || cachedBroadcastedBias == nil {
+                var broadcastedBias = try Tensor(shape: [batchSize, outFeatures], dtype: bias.data.dtype)
+                let srcPtr = bias.data.buffer.pointer.bindMemory(to: Float.self, capacity: outFeatures)
+                let dstPtr = broadcastedBias.buffer.pointer.bindMemory(to: Float.self, capacity: broadcastedBias.count)
+                
+                // Use memcpy per row instead of scalar loop
+                let rowBytes = outFeatures * MemoryLayout<Float>.size
+                for b in 0..<batchSize {
+                    memcpy(dstPtr.advanced(by: b * outFeatures), srcPtr, rowBytes)
                 }
+                
+                let biasGrad = GradTensor(broadcastedBias, requiresGrad: bias.requiresGrad)
+                biasGrad.isLeaf = false
+                cachedBroadcastedBias = biasGrad
+                cachedBatchSize = batchSize
             }
             
-            let biasGrad = GradTensor(broadcastedBias, requiresGrad: bias.requiresGrad)
-            biasGrad.isLeaf = false
-            output = try GradTensor.add(output, biasGrad)
+            output = try GradTensor.add(output, cachedBroadcastedBias!)
         }
         return output
     }
@@ -234,43 +250,49 @@ public final class GradLayerNorm: Module {
     }
     
     public func forward(_ input: GradTensor) throws -> GradTensor {
-        // Simplified layer norm for last dimension
-        let data = input.data.toArray()
-        let lastDim = input.shape.last!
-        let numGroups = input.count / lastDim
-        
-        var result = try Tensor(shape: input.shape, dtype: input.data.dtype)
-        let resultPtr = result.buffer.pointer.bindMemory(to: Float.self, capacity: result.count)
-        let gammaData = gamma.data.toArray()
-        let betaData = beta.data.toArray()
-        
-        for g in 0..<numGroups {
-            let offset = g * lastDim
+        if IntelligentRouter.shared.forcedBackend == .cpu {
+            // Simplified layer norm for last dimension on CPU
+            let data = input.data.toArray()
+            let lastDim = input.shape.last!
+            let numGroups = input.count / lastDim
             
-            // Compute mean
-            var mean: Float = 0
-            for i in 0..<lastDim {
-                mean += data[offset + i]
-            }
-            mean /= Float(lastDim)
+            var result = try Tensor(shape: input.shape, dtype: input.data.dtype)
+            let resultPtr = result.buffer.pointer.bindMemory(to: Float.self, capacity: result.count)
+            let gammaData = gamma.data.toArray()
+            let betaData = beta.data.toArray()
             
-            // Compute variance
-            var variance: Float = 0
-            for i in 0..<lastDim {
-                let diff = data[offset + i] - mean
-                variance += diff * diff
+            for g in 0..<numGroups {
+                let offset = g * lastDim
+                
+                // Compute mean
+                var mean: Float = 0
+                for i in 0..<lastDim {
+                    mean += data[offset + i]
+                }
+                mean /= Float(lastDim)
+                
+                // Compute variance
+                var variance: Float = 0
+                for i in 0..<lastDim {
+                    let diff = data[offset + i] - mean
+                    variance += diff * diff
+                }
+                variance /= Float(lastDim)
+                
+                // Normalize
+                let std = sqrt(variance + eps)
+                for i in 0..<lastDim {
+                    let normalized = (data[offset + i] - mean) / std
+                    resultPtr[offset + i] = normalized * gammaData[i % gammaData.count] + betaData[i % betaData.count]
+                }
             }
-            variance /= Float(lastDim)
             
-            // Normalize
-            let std = sqrt(variance + eps)
-            for i in 0..<lastDim {
-                let normalized = (data[offset + i] - mean) / std
-                resultPtr[offset + i] = normalized * gammaData[i % gammaData.count] + betaData[i % betaData.count]
-            }
+            return GradTensor(result, requiresGrad: input.requiresGrad)
+        } else {
+            // GPU path - stays entirely on GPU
+            let result = try GPUEngine.shared.layerNorm(input.data, gamma: gamma.data, beta: beta.data, eps: eps)
+            return GradTensor(result, requiresGrad: input.requiresGrad)
         }
-        
-        return GradTensor(result, requiresGrad: input.requiresGrad)
     }
     
     public func parameters() -> [GradTensor] { [gamma, beta] }

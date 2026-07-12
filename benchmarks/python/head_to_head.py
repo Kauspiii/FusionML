@@ -231,6 +231,14 @@ def bench_matmul(sizes, iterations=30, verbose=True):
         )
         sr["_fusionml_beats_best"] = fusion_best <= sr["_best_ms"] * 1.02
         
+        # Calculate speedup of FusionML over the best non-FusionML competitor
+        competitors = {k: v for k, v in times.items() if not k.startswith("fusion")}
+        if competitors and fusion_best > 0 and fusion_best != float('inf'):
+            best_competitor_ms = min(competitors.values())
+            sr["_fusionml_speedup_vs_best"] = best_competitor_ms / fusion_best
+        else:
+            sr["_fusionml_speedup_vs_best"] = 1.0
+            
         results[str(size)] = sr
     
     return results

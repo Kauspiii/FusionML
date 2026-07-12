@@ -64,33 +64,68 @@ public final class SGD: Optimizer {
     }
     
     public func step() throws {
+        GPUEngine.shared.sync()
         for (i, param) in parameters.enumerated() {
             guard let grad = param.grad else { continue }
             
-            var g = grad.toArray()
-            var data = param.data.toArray()
+            let gPtr = grad.buffer.pointer.bindMemory(to: Float.self, capacity: param.count)
             let ptr = param.data.buffer.pointer.bindMemory(to: Float.self, capacity: param.count)
             let vPtr = velocities[i].buffer.pointer.bindMemory(to: Float.self, capacity: param.count)
             
-            for j in 0..<param.count {
-                // Weight decay (L2 regularization)
-                if weightDecay != 0 {
-                    g[j] += weightDecay * data[j]
-                }
-                
-                if momentum != 0 {
-                    // Update velocity
-                    vPtr[j] = momentum * vPtr[j] + g[j]
-                    
-                    if nesterov {
-                        g[j] = g[j] + momentum * vPtr[j]
-                    } else {
-                        g[j] = vPtr[j]
+            let count = param.count
+            let blockSize = 65536
+            if count >= blockSize {
+                let numBlocks = (count + blockSize - 1) / blockSize
+                DispatchQueue.concurrentPerform(iterations: numBlocks) { blockIdx in
+                    let start = blockIdx * blockSize
+                    let end = min(start + blockSize, count)
+                    for j in start..<end {
+                        var gj = gPtr[j]
+                        let dataVal = ptr[j]
+                        
+                        // Weight decay (L2 regularization)
+                        if weightDecay != 0 {
+                            gj += weightDecay * dataVal
+                        }
+                        
+                        if momentum != 0 {
+                            // Update velocity
+                            let vj = momentum * vPtr[j] + gj
+                            vPtr[j] = vj
+                            
+                            if nesterov {
+                                gj = gj + momentum * vj
+                            } else {
+                                gj = vj
+                            }
+                        }
+                        
+                        // Update parameter
+                        ptr[j] = dataVal - learningRate * gj
                     }
                 }
-                
-                // Update parameter
-                ptr[j] = data[j] - learningRate * g[j]
+            } else {
+                for j in 0..<count {
+                    var gj = gPtr[j]
+                    let dataVal = ptr[j]
+                    
+                    if weightDecay != 0 {
+                        gj += weightDecay * dataVal
+                    }
+                    
+                    if momentum != 0 {
+                        let vj = momentum * vPtr[j] + gj
+                        vPtr[j] = vj
+                        
+                        if nesterov {
+                            gj = gj + momentum * vj
+                        } else {
+                            gj = vj
+                        }
+                    }
+                    
+                    ptr[j] = dataVal - learningRate * gj
+                }
             }
         }
     }
@@ -152,39 +187,97 @@ public final class Adam: Optimizer {
         for (i, param) in parameters.enumerated() {
             guard let grad = param.grad else { continue }
             
-            let g = grad.toArray()
-            var data = param.data.toArray()
+            // Run Adam step updates on GPU if CPU is not forced and AMSGrad is not enabled
+            if IntelligentRouter.shared.forcedBackend != .cpu && !amsgrad {
+                try GPUEngine.shared.adamStep(
+                    w: param.data.metalBuffer,
+                    g: grad.metalBuffer,
+                    m: m[i].metalBuffer,
+                    v: v[i].metalBuffer,
+                    count: param.count,
+                    lr: learningRate,
+                    beta1: beta1,
+                    beta2: beta2,
+                    eps: epsilon,
+                    weightDecay: weightDecay,
+                    biasCorrection1: biasCorrection1,
+                    biasCorrection2: biasCorrection2
+                )
+                // Mark weight and moment buffers as dirty so CPU knows they were updated on GPU
+                param.data.isDirty = true
+                m[i].isDirty = true
+                v[i].isDirty = true
+                continue
+            }
+            
+            let gPtr = grad.buffer.pointer.bindMemory(to: Float.self, capacity: param.count)
             let ptr = param.data.buffer.pointer.bindMemory(to: Float.self, capacity: param.count)
             let mPtr = m[i].buffer.pointer.bindMemory(to: Float.self, capacity: param.count)
             let vPtr = v[i].buffer.pointer.bindMemory(to: Float.self, capacity: param.count)
             
-            for j in 0..<param.count {
-                var gj = g[j]
-                
-                // Weight decay (AdamW style - decoupled)
-                if weightDecay != 0 {
-                    ptr[j] = data[j] - learningRate * weightDecay * data[j]
-                    data[j] = ptr[j]
+            let count = param.count
+            let blockSize = 65536
+            if count >= blockSize {
+                let numBlocks = (count + blockSize - 1) / blockSize
+                DispatchQueue.concurrentPerform(iterations: numBlocks) { blockIdx in
+                    let start = blockIdx * blockSize
+                    let end = min(start + blockSize, count)
+                    
+                    for j in start..<end {
+                        let gj = gPtr[j]
+                        var dataVal = ptr[j]
+                        
+                        // Weight decay (AdamW style - decoupled)
+                        if weightDecay != 0 {
+                            dataVal = dataVal - learningRate * weightDecay * dataVal
+                        }
+                        
+                        // Update biased first moment
+                        let mj = beta1 * mPtr[j] + (1 - beta1) * gj
+                        mPtr[j] = mj
+                        
+                        // Update biased second moment
+                        let vj = beta2 * vPtr[j] + (1 - beta2) * gj * gj
+                        vPtr[j] = vj
+                        
+                        // Bias correction
+                        let mHat = mj / biasCorrection1
+                        var vHat = vj / biasCorrection2
+                        
+                        if amsgrad, let vMaxPtr = vMax?[i].buffer.pointer.bindMemory(to: Float.self, capacity: param.count) {
+                            vMaxPtr[j] = max(vMaxPtr[j], vHat)
+                            vHat = vMaxPtr[j]
+                        }
+                        
+                        // Update parameter
+                        ptr[j] = dataVal - learningRate * mHat / (sqrt(vHat) + epsilon)
+                    }
                 }
-                
-                // Update biased first moment
-                mPtr[j] = beta1 * mPtr[j] + (1 - beta1) * gj
-                
-                // Update biased second moment
-                vPtr[j] = beta2 * vPtr[j] + (1 - beta2) * gj * gj
-                
-                // Bias correction
-                let mHat = mPtr[j] / biasCorrection1
-                var vHat = vPtr[j] / biasCorrection2
-                
-                // AMSGrad
-                if amsgrad, let vMaxPtr = vMax?[i].buffer.pointer.bindMemory(to: Float.self, capacity: param.count) {
-                    vMaxPtr[j] = max(vMaxPtr[j], vHat)
-                    vHat = vMaxPtr[j]
+            } else {
+                for j in 0..<count {
+                    let gj = gPtr[j]
+                    var dataVal = ptr[j]
+                    
+                    if weightDecay != 0 {
+                        dataVal = dataVal - learningRate * weightDecay * dataVal
+                    }
+                    
+                    let mj = beta1 * mPtr[j] + (1 - beta1) * gj
+                    mPtr[j] = mj
+                    
+                    let vj = beta2 * vPtr[j] + (1 - beta2) * gj * gj
+                    vPtr[j] = vj
+                    
+                    let mHat = mj / biasCorrection1
+                    var vHat = vj / biasCorrection2
+                    
+                    if amsgrad, let vMaxPtr = vMax?[i].buffer.pointer.bindMemory(to: Float.self, capacity: param.count) {
+                        vMaxPtr[j] = max(vMaxPtr[j], vHat)
+                        vHat = vMaxPtr[j]
+                    }
+                    
+                    ptr[j] = dataVal - learningRate * mHat / (sqrt(vHat) + epsilon)
                 }
-                
-                // Update parameter
-                ptr[j] = data[j] - learningRate * mHat / (sqrt(vHat) + epsilon)
             }
         }
     }

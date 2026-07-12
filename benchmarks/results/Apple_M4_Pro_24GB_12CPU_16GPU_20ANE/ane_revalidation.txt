@@ -1,0 +1,97 @@
+=== ane_spike_test.py (dispatch overhead vs GPU) ===
+======================================================================
+  ANE Viability Spike Test
+  Real CoreML/ANE execution vs CPU (Accelerate) vs GPU (MLX)
+======================================================================
+
+▶ ane_chunk_gpt2_ffn: [154x1600] @ [1600x6400]
+  First call (incl. compile): 1010.9 ms
+  ANE steady-state:  median=20.205 ms  std=6.071 ms
+  CPU (Accelerate):  median=25.802 ms
+  GPU (MLX):         median=1.140 ms
+  Correctness: max_abs_err=1.35e-03  rel_err=1.60e-02
+  ANE/GPU ratio: 17.72x (ANE slower)
+  ANE/CPU ratio: 0.78x (ANE faster)
+
+▶ cpu_chunk_gpt2_ffn: [256x1600] @ [1600x6400]
+  First call (incl. compile): 840.8 ms
+  ANE steady-state:  median=21.080 ms  std=7.007 ms
+  CPU (Accelerate):  median=29.269 ms
+  GPU (MLX):         median=2.656 ms
+  Correctness: max_abs_err=1.19e-03  rel_err=1.49e-02
+  ANE/GPU ratio: 7.94x (ANE slower)
+  ANE/CPU ratio: 0.72x (ANE faster)
+
+▶ full_gpt2_ffn: [1024x1600] @ [1600x6400]
+  First call (incl. compile): 849.5 ms
+  ANE steady-state:  median=25.065 ms  std=6.321 ms
+  CPU (Accelerate):  median=69.460 ms
+  GPU (MLX):         median=5.562 ms
+  Correctness: max_abs_err=1.26e-03  rel_err=1.44e-02
+  ANE/GPU ratio: 4.51x (ANE slower)
+  ANE/CPU ratio: 0.36x (ANE faster)
+
+======================================================================
+  VERDICT
+======================================================================
+  ANE is SLOWER than GPU for every tested shape, even at steady-state
+  (model compiled and cached). Adding ANE to the model-level scheduler
+  would not help for these matmul sizes on this hardware.
+
+Saved to /Users/aryamohite/Documents/Om/FusionML/benchmarks/python/../results/Apple_M4_Pro_24GB_12CPU_16GPU_20ANE/ane_spike_test.json
+
+=== ane_mlx_minimal_repro.py (second-shape segfault repro) ===
+Torch version 2.13.0 has not been tested with coremltools. You may run into unexpected errors. Torch 2.7.0 is the most recent version that has been tested.
+Step: calling ane_matmul directly (main thread, no concurrency)...
+Running MIL frontend_milinternal pipeline: 0 passes [00:00, ? passes/s]Running MIL frontend_milinternal pipeline: 0 passes [00:00, ? passes/s]
+Running MIL default pipeline:   0%|          | 0/95 [00:00<?, ? passes/s]Running MIL default pipeline: 100%|██████████| 95/95 [00:00<00:00, 2172.36 passes/s]
+Running MIL backend_mlprogram pipeline:   0%|          | 0/12 [00:00<?, ? passes/s]
+Input 'a' is of dtype fp16. The Core ML I/O does not support this dtype (supported dtypes are: ['fp32', 'int32']). Consider setting `minimum_deployment_target` to a higher IOS version for more supported dtypes. This input is changed to fp32.
+
+Trying to insert a cast op at the beginning of the program to convert the input to the originally defined dtype (fp16).
+
+
+Output 'matmul_0' is of dtype fp16. The Core ML runtime does not support outputs with this dtype (supported dtypes are: {<class 'coremltools.converters.mil.mil.types.type_double.make_float.<locals>.double'>, <class 'coremltools.converters.mil.mil.types.type_int.make_int.<locals>.int'>}). This output will changed to fp32 by adding a cast op at the end of the program.
+
+fp16 dtype output is supported if function.opset_version is chosen to be at least iOS16/macOS13.
+
+Running MIL backend_mlprogram pipeline: 100%|██████████| 12/12 [00:00<00:00, 8345.49 passes/s]
+Step: ane_matmul returned successfully.
+SUCCESS: reached end of script without crashing.
+
+=== ane_multi_tier_repro.py (multi-tier segfault repro) ===
+Torch version 2.13.0 has not been tested with coremltools. You may run into unexpected errors. Torch 2.7.0 is the most recent version that has been tested.
+MLX GPU touch done.
+Loading tier 2373...
+Tier 2373 done, output shape (2373, 6400)
+Loading tier 1566...
+Running MIL frontend_milinternal pipeline: 0 passes [00:00, ? passes/s]Running MIL frontend_milinternal pipeline: 0 passes [00:00, ? passes/s]
+Running MIL default pipeline:   0%|          | 0/95 [00:00<?, ? passes/s]Running MIL default pipeline: 100%|██████████| 95/95 [00:00<00:00, 2232.19 passes/s]
+Running MIL backend_mlprogram pipeline:   0%|          | 0/12 [00:00<?, ? passes/s]
+Input 'a' is of dtype fp16. The Core ML I/O does not support this dtype (supported dtypes are: ['int32', 'fp32']). Consider setting `minimum_deployment_target` to a higher IOS version for more supported dtypes. This input is changed to fp32.
+
+Trying to insert a cast op at the beginning of the program to convert the input to the originally defined dtype (fp16).
+
+
+Output 'matmul_0' is of dtype fp16. The Core ML runtime does not support outputs with this dtype (supported dtypes are: {<class 'coremltools.converters.mil.mil.types.type_int.make_int.<locals>.int'>, <class 'coremltools.converters.mil.mil.types.type_double.make_float.<locals>.double'>}). This output will changed to fp32 by adding a cast op at the end of the program.
+
+fp16 dtype output is supported if function.opset_version is chosen to be at least iOS16/macOS13.
+
+Running MIL backend_mlprogram pipeline: 100%|██████████| 12/12 [00:00<00:00, 11267.44 passes/s]
+Tier 1566 done, output shape (1566, 6400)
+Loading tier 783...
+Running MIL frontend_milinternal pipeline: 0 passes [00:00, ? passes/s]Running MIL frontend_milinternal pipeline: 0 passes [00:00, ? passes/s]
+Running MIL default pipeline:   0%|          | 0/95 [00:00<?, ? passes/s]Running MIL default pipeline: 100%|██████████| 95/95 [00:00<00:00, 2383.40 passes/s]
+Running MIL backend_mlprogram pipeline:   0%|          | 0/12 [00:00<?, ? passes/s]
+Input 'a' is of dtype fp16. The Core ML I/O does not support this dtype (supported dtypes are: ['int32', 'fp32']). Consider setting `minimum_deployment_target` to a higher IOS version for more supported dtypes. This input is changed to fp32.
+
+Trying to insert a cast op at the beginning of the program to convert the input to the originally defined dtype (fp16).
+
+
+Output 'matmul_0' is of dtype fp16. The Core ML runtime does not support outputs with this dtype (supported dtypes are: {<class 'coremltools.converters.mil.mil.types.type_int.make_int.<locals>.int'>, <class 'coremltools.converters.mil.mil.types.type_double.make_float.<locals>.double'>}). This output will changed to fp32 by adding a cast op at the end of the program.
+
+fp16 dtype output is supported if function.opset_version is chosen to be at least iOS16/macOS13.
+
+Running MIL backend_mlprogram pipeline: 100%|██████████| 12/12 [00:00<00:00, 12369.54 passes/s]
+Tier 783 done, output shape (783, 6400)
+SUCCESS: all tiers loaded sequentially without crashing.

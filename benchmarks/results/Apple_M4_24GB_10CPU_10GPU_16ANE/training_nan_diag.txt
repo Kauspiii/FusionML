@@ -1,0 +1,34 @@
+Torch version 2.13.0 has not been tested with coremltools. You may run into unexpected errors. Torch 2.7.0 is the most recent version that has been tested.
+VERSIONS: mlx=0.32.0  coremltools=9.0  macOS=26.3  chip=Apple M4  python=3.11.13
+
+▶ LLAMA (FP16, current scaled+softmax math)
+  Forward, per-stage:
+    ln1          finite=True  max_abs=4.93
+    q            finite=True  max_abs=7.008
+    k            finite=True  max_abs=6.852
+    v            finite=True  max_abs=6.711
+    scores       finite=True  max_abs=7.629
+    softmax      finite=True  max_abs=0.3213
+    attn@v       finite=True  max_abs=1.527
+    h1           finite=True  max_abs=1.937
+    ln2          finite=True  max_abs=5.035
+    mlp_out      finite=True  max_abs=12.87
+    res          finite=True  max_abs=12.65
+    loss fp16-accum = -0.00377655029296875   loss fp32-accum = -0.0037753069773316383
+  Benchmark training step (run_mlx_llama): loss = nan  finite = False
+
+▶ GPT2 (FP16, current scaled+softmax math)
+  Forward, per-stage:
+    ln1          finite=True  max_abs=4.77
+    q            finite=True  max_abs=4.008
+    k            finite=True  max_abs=4.512
+    v            finite=True  max_abs=3.771
+    scores       finite=True  max_abs=3.266
+    softmax      finite=True  max_abs=0.0208
+    attn@v       finite=True  max_abs=0.1532
+    h1           finite=True  max_abs=0.1548
+    ln2          finite=True  max_abs=4.598
+    mlp_out      finite=True  max_abs=3.949
+    res          finite=True  max_abs=3.98
+    loss fp16-accum = 0.008087158203125   loss fp32-accum = 0.008278380148112774
+  Benchmark training step (run_mlx_gpt2): loss = nan  finite = False

@@ -30,12 +30,20 @@ Clean-protocol suite (`run_clean_suite.sh`). Speedup vs adjacent MLX-FP16:
   at 24GB**, completing the cross-machine ablation.
 - Llama split wins are LARGER on M4 (1.15–1.25× vs 1.06–1.18× on M1).
 
-⚠ **M4 training baseline INVALID: MLX-FP16 training loss is non-finite (NaN)
-on M4 for BOTH models** (finite on M1, same code/seed). Do not cite any M4
-training number (incl. the 0.70×/0.76× ratios) until the numerical issue is
-diagnosed — run `llama_fp16_nan_check.py` on the M4. FusionML-vs-FP32 on M4
-also flipped negative (631 vs 591 ms Llama). Training story: unresolved on
-M4, verified-loss on M1.
+**M4 training-NaN RESOLVED (2026-07-12): version skew, not a platform bug.**
+The June attention fix (1/√D scaling + fp32 softmax) had never been
+committed — it existed only in the M1 machine's working tree. The mini ran
+the committed (unscaled, softmax-free) code, which overflows FP16 training
+to NaN, exactly as the June postmortem predicted. Bisected conclusively
+(`vag_nan_bisect.py`/`vag_nan_bisect2.py`: identical math copied from the
+working tree = finite; imported committed function = NaN; same process,
+weights, versions). Fix committed in 5506d46. All M4 training numbers
+produced before that commit timed the wrong computation and are INVALID —
+re-run `mlx_fp16_training_baseline.py` on the mini. Prefill/split results
+are unaffected (self-contained fixed math). Side finding kept: MLX 0.30.1
+vs 0.32.0 both compute this workload finitely on both chips, and the ANE
+crash conditions are absent on the mini's stack (macOS 26.3, same
+coremltools 9.0 — repros run clean there, segfault on macOS 25.5).
 
 ## Headline claims, ranked by strength
 

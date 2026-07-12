@@ -1,0 +1,4 @@
+mlx 0.32.0
+  F exact_copy         vag=-0.003777  finite=True
+  G math_after_import  vag=-0.003651  finite=True
+  H exact_import       vag=+nan  finite=False

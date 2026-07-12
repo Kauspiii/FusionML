@@ -48,8 +48,30 @@ echo ""
 echo "── Cooling ${COOLDOWN}s before phase 3..."
 sleep "$COOLDOWN"
 
-echo "── Phase 3/3: dynamic-gate convergence test (llama @ 8192, n=200 timeline)"
+echo "── Phase 3/4: dynamic-gate convergence test (llama @ 8192, n=200 timeline)"
 "$PY" dynamic_convergence_test.py
+
+echo ""
+echo "── Cooling ${COOLDOWN}s before phase 4..."
+sleep "$COOLDOWN"
+
+echo "── Phase 4/4: ANE re-validation (dispatch overhead + MLX-coexistence crash repros)"
+# These characterize the ANE/CoreML stack on THIS machine. The two repro
+# scripts are EXPECTED to crash (segfault) on stacks with the known
+# coremltools/MLX bug — a crash here is a valid result, not a suite failure.
+SLUG="$("$PY" -c "from bench_hw import get_system_info; print(get_system_info()['cpu_slug'])")"
+ANE_LOG="$SCRIPT_DIR/results/$SLUG/ane_revalidation.txt"
+mkdir -p "$(dirname "$ANE_LOG")"
+{
+    echo "=== ane_spike_test.py (dispatch overhead vs GPU) ==="
+    "$PY" ane_spike_test.py 2>&1 || echo "[exit code $? — see above]"
+    echo ""
+    echo "=== ane_mlx_minimal_repro.py (second-shape segfault repro) ==="
+    "$PY" ane_mlx_minimal_repro.py 2>&1 || echo "[exit code $? — segfault(139)=bug still present; 0=FIXED on this stack]"
+    echo ""
+    echo "=== ane_multi_tier_repro.py (multi-tier segfault repro) ==="
+    "$PY" ane_multi_tier_repro.py 2>&1 || echo "[exit code $? — segfault(139)=bug still present; 0=FIXED on this stack]"
+} | tee "$ANE_LOG"
 
 echo ""
 echo "=== Suite complete ==="

@@ -1,1 +1,40 @@
-.venv/bin/python: can't open file '/Users/ommohite/Documents/Programming/FusionML/benchmarks/python/llama_fp16_nan_check.py': [Errno 2] No such file or directory
+======================================================================
+  Unscaled-Attention FP16 NaN Check
+  (Does the ALREADY-COMMITTED Llama FP16 training number
+   correspond to a NaN loss?)
+======================================================================
+
+LLAMA (D=4096, unscaled Q@K^T attention, FP16):
+  loss = -0.0026397705078125
+  loss is NaN: False
+    w_q      grad_norm = 1.240044e-01
+    w_k      grad_norm = 1.247969e-01
+    w_v      grad_norm = 3.586106e-01
+    w_o      grad_norm = 3.614959e-01
+    w_gate   grad_norm = 1.918124e-01
+    w_up     grad_norm = 3.046874e-01
+    w_down   grad_norm = 3.048944e-01
+    ln1_g    grad_norm = 8.152802e-03
+    ln1_b    grad_norm = 2.190304e-01
+    ln2_g    grad_norm = 7.189758e-03
+    ln2_b    grad_norm = 2.069881e-02
+
+GPT2 (D=1600, unscaled Q@K^T attention, FP16):
+  loss = -0.0152130126953125
+  loss is NaN: False
+    w_q      grad_norm = 1.288204e-02
+    w_k      grad_norm = 1.348367e-02
+    w_v      grad_norm = 5.242933e-01
+    w_o      grad_norm = 5.182886e-01
+    w_fc1    grad_norm = 5.200292e-01
+    w_fc2    grad_norm = 6.284032e-01
+    ln1_g    grad_norm = 1.021816e-02
+    ln1_b    grad_norm = 3.261999e-01
+    ln2_g    grad_norm = 1.037042e-02
+    ln2_b    grad_norm = 1.709391e-02
+
+======================================================================
+  VERDICT
+======================================================================
+  Llama FP16 training loss NaN: False
+  GPT-2 FP16 training loss NaN: False

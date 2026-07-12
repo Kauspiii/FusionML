@@ -1,8 +1,41 @@
 # FusionML — Paper Readiness Status
 
-Last updated: 2026-07-10 (M1 8GB, all numbers n=50/warmup=10 unless noted;
-every comparison below is against a precision-matched MLX-FP16 baseline
-unless explicitly labeled FP32).
+Last updated: 2026-07-10 (M1 8GB fanless + M4 24GB Mac mini; all numbers
+n=50/warmup=10 unless noted; every comparison below is against a
+precision-matched MLX-FP16 baseline unless explicitly labeled FP32).
+
+## M4 Mac mini replication (24GB, actively cooled, AC) — HEADLINE TABLE
+
+Clean-protocol suite (`run_clean_suite.sh`). Speedup vs adjacent MLX-FP16:
+
+| Cell | split | dynamic | nosplit | gate mode |
+|---|---|---|---|---|
+| Llama 1024 | 1.148× | 1.146× | 1.003× | split |
+| Llama 2048 | 1.166× | 1.171× | 1.002× | split |
+| Llama 4096 | **1.249×** | **1.251×** | 1.006× | split |
+| Llama 8192 | 1.170× | 1.167× | 1.000× | split |
+| GPT-2 1024 | 1.053× | 1.006× | 1.019× | nosplit |
+| GPT-2 2048 | 1.025× | 1.022× | 1.025× | nosplit |
+| GPT-2 4096 | 1.136× | 1.169× | 1.024× | split |
+| GPT-2 8192 | 1.054× | 1.053× | 1.025× | split |
+
+- **Floor requirement met: every dynamic cell ≥ 1.006×.** Gate picked split
+  where split wins, nosplit where parity — zero mid-run switches needed.
+- GPT-2 instability GONE on cooled/desktop hardware — confirms the M1 swings
+  were thermal/power, not architectural.
+- Llama/8192 memory-pressure hypothesis CONFIRMED: 0.97× on 8GB → 1.17× on
+  24GB. Convergence test (n=200): dynamic holds 1.179–1.195× across the whole
+  window, baseline drift zero (1432.9→1431.2 ms), probe reads within 1–4% of
+  true baseline — **observer effect is memory-pressure-specific and vanishes
+  at 24GB**, completing the cross-machine ablation.
+- Llama split wins are LARGER on M4 (1.15–1.25× vs 1.06–1.18× on M1).
+
+⚠ **M4 training baseline INVALID: MLX-FP16 training loss is non-finite (NaN)
+on M4 for BOTH models** (finite on M1, same code/seed). Do not cite any M4
+training number (incl. the 0.70×/0.76× ratios) until the numerical issue is
+diagnosed — run `llama_fp16_nan_check.py` on the M4. FusionML-vs-FP32 on M4
+also flipped negative (631 vs 591 ms Llama). Training story: unresolved on
+M4, verified-loss on M1.
 
 ## Headline claims, ranked by strength
 

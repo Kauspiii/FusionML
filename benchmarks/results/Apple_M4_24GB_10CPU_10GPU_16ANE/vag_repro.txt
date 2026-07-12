@@ -1,0 +1,12 @@
+mlx 0.32.0
+  forward-only loss        : -0.00377655029296875
+  value_and_grad loss      : -0.00377655029296875
+  grad norms finite        : True  (norms: [0.1214, 0.1219, 0.3574, 0.3626]...)
+
+  VERDICT: no repro on this mlx version
+mlx 0.30.1
+  forward-only loss        : -0.00377655029296875
+  value_and_grad loss      : -0.00377655029296875
+  grad norms finite        : True  (norms: [0.1214, 0.1219, 0.3574, 0.3626]...)
+
+  VERDICT: no repro on this mlx version

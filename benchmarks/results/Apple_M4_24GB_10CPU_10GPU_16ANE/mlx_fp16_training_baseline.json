@@ -1,0 +1,76 @@
+{
+  "warmups": 10,
+  "runs": 50,
+  "environment": {
+    "cpu": "Apple M4",
+    "memory": "24GB",
+    "cpu_cores": "10",
+    "gpu_cores": "10",
+    "ane_cores": "16",
+    "model_id": "Mac16,10",
+    "passively_cooled": false,
+    "cpu_slug": "Apple_M4_24GB_10CPU_10GPU_16ANE",
+    "power_source": "AC",
+    "thermal_notes": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded"
+  },
+  "results": {
+    "llama": {
+      "mlx_fp32": {
+        "mean": 591.6976825199708,
+        "std": 3.2216543920757914,
+        "median": 591.0560830000122,
+        "ci95": 0.8929970375722768,
+        "n_runs": 50,
+        "peak_mem_mb": 1687.765625,
+        "final_loss": -0.466105580329895,
+        "loss_finite": true
+      },
+      "mlx_fp16": {
+        "mean": 440.11353752002833,
+        "std": 1.0277283162623925,
+        "median": 439.66935449998346,
+        "ci95": 0.2848717553654556,
+        "n_runs": 50,
+        "peak_mem_mb": 1685.953125,
+        "final_loss": NaN,
+        "loss_finite": false
+      },
+      "fusionml": {
+        "mean": 631.7249583999001,
+        "std": 1.6009172838547918,
+        "median": 631.3437499998145,
+        "min": 629.9249579997195,
+        "max": 634.0645000000222
+      }
+    },
+    "gpt2": {
+      "mlx_fp32": {
+        "mean": 85.80393928001286,
+        "std": 0.4395557991120067,
+        "median": 85.7504585001152,
+        "ci95": 0.12183865141469293,
+        "n_runs": 50,
+        "peak_mem_mb": 341.4375,
+        "final_loss": 0.295097678899765,
+        "loss_finite": true
+      },
+      "mlx_fp16": {
+        "mean": 76.52907489999961,
+        "std": 0.3047238774673909,
+        "median": 76.5166250000675,
+        "ci95": 0.08446514949748705,
+        "n_runs": 50,
+        "peak_mem_mb": 342.578125,
+        "final_loss": NaN,
+        "loss_finite": false
+      },
+      "fusionml": {
+        "mean": 101.01886659995216,
+        "std": 0.457973423732098,
+        "median": 101.05520800016166,
+        "min": 100.39449999976569,
+        "max": 101.62820799996553
+      }
+    }
+  }
+}

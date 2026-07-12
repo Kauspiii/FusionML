@@ -1,0 +1,42 @@
+======================================================================
+  ANE Viability Spike Test
+  Real CoreML/ANE execution vs CPU (Accelerate) vs GPU (MLX)
+======================================================================
+
+▶ ane_chunk_gpt2_ffn: [154x1600] @ [1600x6400]
+  First call (incl. compile): 1483.2 ms
+  ANE steady-state:  median=18.569 ms  std=5.631 ms
+  CPU (Accelerate):  median=17.298 ms
+  GPU (MLX):         median=2.600 ms
+  Correctness: max_abs_err=1.35e-03  rel_err=1.60e-02
+  ANE/GPU ratio: 7.14x (ANE slower)
+  ANE/CPU ratio: 1.07x (ANE slower)
+
+▶ cpu_chunk_gpt2_ffn: [256x1600] @ [1600x6400]
+  First call (incl. compile): 818.4 ms
+  ANE steady-state:  median=21.263 ms  std=3.807 ms
+  CPU (Accelerate):  median=15.244 ms
+  GPU (MLX):         median=3.443 ms
+  Correctness: max_abs_err=1.19e-03  rel_err=1.49e-02
+  ANE/GPU ratio: 6.18x (ANE slower)
+  ANE/CPU ratio: 1.39x (ANE slower)
+
+▶ full_gpt2_ffn: [1024x1600] @ [1600x6400]
+  First call (incl. compile): 19325.1 ms
+  ANE steady-state:  median=23.021 ms  std=3.969 ms
+  CPU (Accelerate):  median=52.266 ms
+  GPU (MLX):         median=7.748 ms
+  Correctness: max_abs_err=1.26e-03  rel_err=1.44e-02
+  ANE/GPU ratio: 2.97x (ANE slower)
+  ANE/CPU ratio: 0.44x (ANE faster)
+
+======================================================================
+  VERDICT
+======================================================================
+  ANE is SLOWER than GPU for every tested shape, even at steady-state
+  (model compiled and cached). Adding ANE to the model-level scheduler
+  would not help for these matmul sizes on this hardware.
+
+Saved to /Users/ommohite/Documents/Programming/FusionML/benchmarks/python/../results/Apple_M4_24GB_10CPU_10GPU_16ANE/ane_spike_test.json
+.venv/bin/python: can't open file '/Users/ommohite/Documents/Programming/FusionML/benchmarks/python/ane_mlx_minimal_repro.py': [Errno 2] No such file or directory
+.venv/bin/python: can't open file '/Users/ommohite/Documents/Programming/FusionML/benchmarks/python/ane_multi_tier_repro.py': [Errno 2] No such file or directory

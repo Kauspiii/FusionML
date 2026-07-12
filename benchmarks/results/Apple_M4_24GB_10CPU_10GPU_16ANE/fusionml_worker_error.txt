@@ -1,0 +1,7 @@
+Torch version 2.13.0 has not been tested with coremltools. You may run into unexpected errors. Torch 2.7.0 is the most recent version that has been tested.
+Traceback (most recent call last):
+  File "/Users/ommohite/Documents/Programming/FusionML/benchmarks/python/model_comparison.py", line 1125, in <module>
+    main()
+  File "/Users/ommohite/Documents/Programming/FusionML/benchmarks/python/model_comparison.py", line 931, in main
+    scheduler.calibrate(shapes=shapes, iterations=15, verbose=False)
+TypeError: TriComputeScheduler.calibrate() got an unexpected keyword argument 'shapes'

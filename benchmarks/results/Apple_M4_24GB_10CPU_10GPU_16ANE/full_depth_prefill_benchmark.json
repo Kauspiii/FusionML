@@ -1,0 +1,103 @@
+{
+  "n_blocks": 32,
+  "runs": 10,
+  "warmups": 3,
+  "environment": {
+    "cpu": "Apple M4",
+    "memory": "24GB",
+    "cpu_cores": "10",
+    "gpu_cores": "10",
+    "ane_cores": "16",
+    "model_id": "Mac16,10",
+    "passively_cooled": false,
+    "cpu_slug": "Apple_M4_24GB_10CPU_10GPU_16ANE",
+    "power_source": "AC",
+    "thermal_notes": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded"
+  },
+  "results": {
+    "2048": {
+      "mlx_fp16": {
+        "mean": 9703.441316599987,
+        "std": 125.33363385987047,
+        "median": 9650.822145999968,
+        "ci95": 77.68259108286713,
+        "n_runs": 10,
+        "n_blocks": 32,
+        "peak_mem_mb": 1852.078125,
+        "tokens_per_sec_prefill": 211.05914213099027
+      },
+      "fusion_split": {
+        "mean": 8935.472404300013,
+        "std": 368.2132080714497,
+        "median": 8834.21268799998,
+        "ci95": 228.2209108044022,
+        "n_runs": 10,
+        "n_blocks": 32,
+        "peak_mem_mb": 15308.15625,
+        "tokens_per_sec_prefill": 229.19885008143967,
+        "calibration": {
+          "2048x4096x4096": 0.3,
+          "2048x4096x14336": 0.3,
+          "2048x14336x4096": 0.3
+        },
+        "max_rel_err_vs_gpu_only_full_depth": 0.003286770720085019
+      }
+    },
+    "4096": {
+      "mlx_fp16": {
+        "mean": 25371.27597909999,
+        "std": 7425.276544243394,
+        "median": 21523.023499999967,
+        "ci95": 4602.234082740897,
+        "n_runs": 10,
+        "n_blocks": 32,
+        "peak_mem_mb": 1850.203125,
+        "tokens_per_sec_prefill": 161.4424124105602
+      },
+      "fusion_split": {
+        "mean": 30158.984654400003,
+        "std": 13589.117014150714,
+        "median": 22142.47127100009,
+        "ci95": 8422.621986431515,
+        "n_runs": 10,
+        "n_blocks": 32,
+        "peak_mem_mb": 15635.859375,
+        "tokens_per_sec_prefill": 135.8135907736012,
+        "calibration": {
+          "4096x4096x4096": 0.3,
+          "4096x4096x14336": 0.3,
+          "4096x14336x4096": 0.3
+        },
+        "max_rel_err_vs_gpu_only_full_depth": 0.002878289449445984
+      }
+    },
+    "8192": {
+      "mlx_fp16": {
+        "mean": 80514.2847583,
+        "std": 23360.267089482415,
+        "median": 81169.3164789997,
+        "ci95": 14478.84354751682,
+        "n_runs": 10,
+        "n_blocks": 32,
+        "peak_mem_mb": 1850.75,
+        "tokens_per_sec_prefill": 101.74592029963365
+      },
+      "fusion_split": {
+        "mean": 44890.10578750003,
+        "std": 5146.708878779218,
+        "median": 44425.36289600003,
+        "ci95": 3189.9632121077384,
+        "n_runs": 10,
+        "n_blocks": 32,
+        "peak_mem_mb": 16073.9375,
+        "tokens_per_sec_prefill": 182.4901023575026,
+        "calibration": {
+          "8192x4096x4096": 0.3,
+          "8192x4096x14336": 0.3,
+          "8192x14336x4096": 0.35
+        },
+        "max_rel_err_vs_gpu_only_full_depth": 0.0033653845822485214
+      }
+    }
+  }
+}

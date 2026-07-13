@@ -46,6 +46,28 @@ and open a PR — the template asks only for what the JSONs can't capture
 | 3 | `python/dynamic_convergence_test.py` | Does the runtime split/nosplit gate converge to baseline-or-better, and what does probing cost? (n=200 per-call timeline) |
 | 4 | `python/ane_spike_test.py` + ANE crash repros | ANE dispatch overhead on this stack, and whether the CoreML/MLX coexistence segfaults (present on macOS ≤25.x) are fixed. |
 
+## End-to-end benchmarks (M4 / M4 Pro, 24GB — the "reality check" pair)
+
+Two additional benchmarks close the gap between block-level results and
+real-inference claims. Run both, push results like the suite:
+
+```bash
+cd benchmarks/python
+# 1. Full model depth: 32 stacked Llama-8B-geometry blocks (~15.6GB fp16)
+.venv/bin/python full_depth_prefill_benchmark.py
+
+# 2. Real checkpoint via mlx-lm: TTFT + decode tok/s vs stock, with verbatim
+#    prompt/reply transcripts and token-identical output verification
+.venv/bin/pip install mlx-lm
+.venv/bin/python mlxlm_ttft_benchmark.py     # downloads Qwen2.5-7B-bf16 (~15GB)
+```
+
+The mlx-lm run writes `mlxlm_transcripts.md` — the exact prompts and both
+arms' replies — as a human-readable proof artifact: identical output tokens,
+faster time-to-first-token. Scope note: the split accelerates **prefill/TTFT
+only**; decode is memory-bandwidth-bound on unified memory and is left
+untouched by design (measured decode-neutral).
+
 ## Script index
 
 **Current measurement suite** (run by `run_clean_suite.sh`): the four scripts

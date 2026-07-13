@@ -1,0 +1,51 @@
+{
+  "model": "mlx-community/Qwen2.5-1.5B-Instruct-bf16",
+  "greedy": true,
+  "repeats": 5,
+  "cpu_ratio": 0.3,
+  "min_split_rows": 1024,
+  "environment": {
+    "cpu": "Apple M1",
+    "memory": "8GB",
+    "cpu_cores": "8",
+    "gpu_cores": "7",
+    "ane_cores": "16",
+    "model_id": "MacBookAir10,1",
+    "passively_cooled": true,
+    "cpu_slug": "Apple_M1_8GB_8CPU_7GPU_16ANE",
+    "power_source": "battery",
+    "battery_pct": "87%",
+    "thermal_notes": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded"
+  },
+  "results": {
+    "1600": {
+      "prompt_tokens": 1597,
+      "new_tokens": 64,
+      "stock": {
+        "ttft_median_ms": 3066.979415998503,
+        "ttft_all_ms": [
+          3539.23,
+          3066.98,
+          3046.46,
+          3068.18,
+          3040.38
+        ],
+        "decode_tok_s_median": 17.597851184606974
+      },
+      "fusionml": {
+        "ttft_median_ms": 2932.710875000339,
+        "ttft_all_ms": [
+          3048.19,
+          2946.34,
+          2932.71,
+          2924.64,
+          2914.87
+        ],
+        "decode_tok_s_median": 17.659957315020318
+      },
+      "ttft_speedup": 1.045783081497302,
+      "outputs_identical": true,
+      "split_calls": 700
+    }
+  }
+}

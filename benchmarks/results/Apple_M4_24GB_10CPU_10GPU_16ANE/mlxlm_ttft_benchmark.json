@@ -1,0 +1,108 @@
+{
+  "model": "mlx-community/Qwen2.5-7B-Instruct-bf16",
+  "greedy": true,
+  "repeats": 5,
+  "cpu_ratio": 0.3,
+  "min_split_rows": 1024,
+  "environment": {
+    "cpu": "Apple M4",
+    "memory": "24GB",
+    "cpu_cores": "10",
+    "gpu_cores": "10",
+    "ane_cores": "16",
+    "model_id": "Mac16,10",
+    "passively_cooled": false,
+    "cpu_slug": "Apple_M4_24GB_10CPU_10GPU_16ANE",
+    "power_source": "AC",
+    "thermal_notes": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded"
+  },
+  "results": {
+    "2048": {
+      "prompt_tokens": 2045,
+      "new_tokens": 64,
+      "stock": {
+        "ttft_median_ms": 7654.293334000613,
+        "ttft_all_ms": [
+          13109.78,
+          7654.29,
+          7651.2,
+          7654.31,
+          7651.96
+        ],
+        "decode_tok_s_median": 7.126820852967162
+      },
+      "fusionml": {
+        "ttft_median_ms": 6123.876249999739,
+        "ttft_all_ms": [
+          6462.19,
+          6123.88,
+          6124.97,
+          6120.84,
+          6117.58
+        ],
+        "decode_tok_s_median": 7.128335415945689
+      },
+      "ttft_speedup": 1.2499098645242772,
+      "outputs_identical": true,
+      "split_calls": 985
+    },
+    "4096": {
+      "prompt_tokens": 4093,
+      "new_tokens": 64,
+      "stock": {
+        "ttft_median_ms": 15472.928875000434,
+        "ttft_all_ms": [
+          15551.59,
+          15472.24,
+          15475.35,
+          15466.7,
+          15472.93
+        ],
+        "decode_tok_s_median": 7.056358877267421
+      },
+      "fusionml": {
+        "ttft_median_ms": 12433.940917000655,
+        "ttft_all_ms": [
+          12448.84,
+          12431.5,
+          12430.9,
+          12433.94,
+          12446.07
+        ],
+        "decode_tok_s_median": 7.054731686228659
+      },
+      "ttft_speedup": 1.2444106802731094,
+      "outputs_identical": true,
+      "split_calls": 1970
+    },
+    "8192": {
+      "prompt_tokens": 8189,
+      "new_tokens": 64,
+      "stock": {
+        "ttft_median_ms": 32571.45641599891,
+        "ttft_all_ms": [
+          32850.5,
+          32569.13,
+          32571.46,
+          32571.28,
+          32576.03
+        ],
+        "decode_tok_s_median": 6.915894969068152
+      },
+      "fusionml": {
+        "ttft_median_ms": 27616.124915999535,
+        "ttft_all_ms": [
+          27504.43,
+          27523.6,
+          27616.12,
+          27671.05,
+          27652.16
+        ],
+        "decode_tok_s_median": 6.91086159548955
+      },
+      "ttft_speedup": 1.17943616329489,
+      "outputs_identical": true,
+      "split_calls": 3940
+    }
+  }
+}

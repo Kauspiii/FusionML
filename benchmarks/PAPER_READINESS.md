@@ -74,6 +74,26 @@ vs 0.32.0 both compute this workload finitely on both chips, and the ANE
 crash conditions are absent on the mini's stack (macOS 26.3, same
 coremltools 9.0 — repros run clean there, segfault on macOS 25.5).
 
+## THE HEADLINE (2026-07-13): real-model, real-runner, end-to-end
+
+**Up to 1.25× faster time-to-first-token on a real 7B checkpoint
+(Qwen2.5-7B-Instruct-bf16) running through stock MLX-LM, with token-identical
+outputs and unchanged decode speed** (M4 24GB, greedy decoding, verbatim
+prompt/reply transcripts in `mlxlm_transcripts.md`):
+- TTFT: 1.250× @2k-token prompt, 1.244× @4k, 1.179× @8k (untuned fixed 0.30
+  CPU ratio — per-shape calibration should raise this)
+- Decode: 7.1 vs 7.1 tok/s — exactly neutral, as the bandwidth-bound scoping
+  theory predicts (decode streams all weights through shared unified-memory
+  bandwidth; co-execution adds compute, not bandwidth)
+- Full-depth control (32 stacked Llama-8B-geometry blocks, 15.6GB fp16):
+  1.121×/1.236×/1.197× at seq 2048/4096/8192 — block-level wins survive
+  depth unchanged; rel_err ≤3.4e-3 through all 32 blocks.
+
+Claim chain now complete: stream-serialization probe → single block →
+full depth → real checkpoint through the standard runner. The correctly
+scoped inference claim: "faster TTFT / prefill for long-context workloads,
+decode-neutral, outputs bit-identical."
+
 ## Headline claims, ranked by strength
 
 ### 1. Contention-aware heterogeneous scheduling wins at batch scale (STRONG)
